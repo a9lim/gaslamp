@@ -12,9 +12,11 @@
 //     `read-only` | `workspace-write` | `danger-full-access`. The default when a
 //     call omits it comes from GASLAMP_SANDBOX, analogous to Codex reading
 //     `sandbox_mode` from config.toml.
-//   - No bespoke timeout, no auth shim, no recursion isolation — a consulted
-//     Claude inherits the parent env and loads the user's full config/MCP,
-//     exactly as a consulted Codex does.
+//   - No bespoke timeout and no recursion isolation — a consulted Claude loads
+//     the user's full config/MCP, exactly as a consulted Codex does.
+//   - The lone Claude-only step (no Codex analog, so not an asymmetry):
+//     ANTHROPIC_API_KEY is stripped from the child env so keychain OAuth is
+//     authoritative. A stale env key 401s every call otherwise.
 //
 // Claude has no filesystem-scoped sandbox, so Codex's three levels collapse to
 // two honest ones: `read-only` → a read-only tool allowlist (advisory reviewer);
