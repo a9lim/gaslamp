@@ -20,7 +20,7 @@ jobs:
       contents: write   # tag + GH release
       id-token: write   # npm trusted publishing (OIDC) + provenance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
