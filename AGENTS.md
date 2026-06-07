@@ -32,10 +32,13 @@ stdio MCP server that wraps `claude -p`.
 `src/server.mjs` flow on a `gaslamp` / `gaslamp-reply` call:
 
 1. Spawn `claude -p <prompt> --output-format json` (`--resume <id>` on reply).
-2. Map the per-call `sandbox` (same enum as Codex) to a permission flag:
-   `read-only` → `--allowedTools <read-only set>`; `workspace-write` /
-   `danger-full-access` → `--dangerously-skip-permissions`. The default comes from
-   `GASLAMP_SANDBOX`, mirroring Codex reading `sandbox_mode` from config.toml.
+2. Map the per-call `sandbox` to permission flags — but the default is to pass
+   none. An omitted `sandbox` lets the consulted `claude -p` read the user's own
+   `~/.claude` config (permission defaultMode, allow/deny, model, MCP), the mirror
+   of Codex deferring to `sandbox_mode` in config.toml. Overrides: `read-only` →
+   `--permission-mode default --allowedTools <read set>` (forces advisory and beats
+   the user's defaultMode, even `bypassPermissions`); `danger-full-access` →
+   `--dangerously-skip-permissions`. Claude has no fs sandbox, so no `workspace-write`.
 3. Strip `ANTHROPIC_API_KEY` from the child env so Claude uses keychain OAuth
    rather than a (possibly stale) env key. This is the *one* Claude-only step
    with no Codex analog (Codex never reads that var), so it isn't an asymmetry —
@@ -121,8 +124,7 @@ cwd, or the approval elicitation will stall it). Watch progress with
 
 | var | default | meaning |
 |-----|---------|---------|
-| `GASLAMP_SANDBOX` | `workspace-write` | default sandbox when a call omits `sandbox` (`read-only` = advisory reviewer) |
-| `GASLAMP_ALLOWED_TOOLS` | read-only set | tools available under the `read-only` sandbox |
+| `GASLAMP_ALLOWED_TOOLS` | `Read Grep Glob WebFetch WebSearch` | tools the `read-only` override permits |
 | `GASLAMP_LOGFILE` | `~/.codex/gaslamp.log` | transcript path; `off` to disable |
 | `GASLAMP_DEBUG` | unset | verbose stderr (raw JSON-RPC) |
 | `CLAUDE_BIN` | autodetected | path to the `claude` binary |

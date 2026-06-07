@@ -28,9 +28,12 @@ Usage:
   gaslamp --version      Print the version.
   gaslamp --help         Print this help.
 
+A Codex->Claude consult with no \`sandbox\` arg uses the user's own ~/.claude
+config (permission mode, allow/deny, model, MCP). \`read-only\` and
+\`danger-full-access\` are per-call overrides.
+
 Env knobs (read by the server):
-  GASLAMP_SANDBOX        default sandbox: read-only | workspace-write | danger-full-access
-  GASLAMP_ALLOWED_TOOLS  tools allowed under the read-only sandbox
+  GASLAMP_ALLOWED_TOOLS  tools the \`read-only\` override permits (space/comma list)
   GASLAMP_LOGFILE        transcript path (default ~/.codex/gaslamp.log; "off" disables)
   GASLAMP_DEBUG          verbose stderr (raw JSON-RPC)
   CLAUDE_BIN             path to the claude binary (autodetected otherwise)

@@ -7,21 +7,27 @@
 //   gaslamp-reply  continue a prior consultation by sessionId
 //
 // Symmetry with `codex mcp-server`:
-//   - Per-call `sandbox` arg with the same enum as Codex:
-//     `read-only` | `workspace-write` | `danger-full-access`. The default when a
-//     call omits it comes from GASLAMP_SANDBOX, analogous to Codex reading
-//     `sandbox_mode` from config.toml.
+//   - Per-call `sandbox` arg; OMITTING it defers to the user's own Claude config
+//     (~/.claude settings: permission defaultMode, allow/deny rules, model, MCP,
+//     CLAUDE.md), the mirror of Codex deferring to `sandbox_mode` in config.toml.
 //   - No bespoke timeout and no recursion isolation — a consulted Claude loads
 //     the user's full config/MCP, exactly as a consulted Codex does.
 //   - The lone Claude-only step (no Codex analog, so not an asymmetry):
 //     ANTHROPIC_API_KEY is stripped from the child env so keychain OAuth is
 //     authoritative. A stale env key 401s every call otherwise.
 //
-// Claude has no filesystem-scoped sandbox, so Codex's three levels collapse to
-// two honest ones: `read-only` → a read-only tool allowlist (advisory reviewer);
-// `workspace-write` / `danger-full-access` → full read/write
-// (--dangerously-skip-permissions). We accept all three values for interface
-// parity and map the latter two the same way.
+// Claude has no filesystem-scoped sandbox, so there is no honest `workspace-write`
+// middle ground (it would map to the same full access as danger-full-access). The
+// `sandbox` arg therefore has two explicit overrides, and omitting it is the
+// default:
+//   - omitted             → pass no permission flag; the consulted Claude uses
+//                           the user's own ~/.claude config (see above). Since
+//                           `claude -p` loads settings by default, this is exactly
+//                           how the user's interactive Claude would behave here.
+//   - read-only           → --permission-mode default --allowedTools <read set>,
+//                           which overrides the user's defaultMode (even bypass)
+//                           and restricts to read tools (advisory reviewer).
+//   - danger-full-access  → --dangerously-skip-permissions (force full read/write).
 //
 // Zero dependencies. Newline-delimited JSON-RPC over stdio (MCP stdio transport).
 
@@ -42,12 +48,13 @@ const VERSION = (() => {
   }
 })();
 
-const SANDBOXES = ["read-only", "workspace-write", "danger-full-access"];
-const DEFAULT_SANDBOX = SANDBOXES.includes(process.env.GASLAMP_SANDBOX)
-  ? process.env.GASLAMP_SANDBOX
-  : "workspace-write";
-const ALLOWED_TOOLS = process.env.GASLAMP_ALLOWED_TOOLS ||
-  "Read Grep Glob WebFetch WebSearch Bash(git *)";
+const SANDBOXES = ["read-only", "danger-full-access"];
+// Tools permitted under the `read-only` override. Pure read set by default; set
+// GASLAMP_ALLOWED_TOOLS (space- or comma-separated) to widen it, e.g. add
+// `Bash(git diff:*)`. This is the ONLY thing this var affects now — there is no
+// bespoke default sandbox; an omitted `sandbox` defers to the user's own config.
+const ALLOWED_TOOLS = (process.env.GASLAMP_ALLOWED_TOOLS || "Read Grep Glob WebFetch WebSearch")
+  .split(/[\s,]+/).filter(Boolean).join(",");
 const DEBUG = !!process.env.GASLAMP_DEBUG;
 
 // Persistent consultation transcript (the lightweight "watch them talk" log).
@@ -83,9 +90,10 @@ const OUTPUT_SCHEMA = {
 };
 
 const SANDBOX_DESC =
-  "Sandbox mode: `read-only`, `workspace-write`, or `danger-full-access`. " +
-  "Claude has no filesystem sandbox, so the latter two both grant full read/write; " +
-  "`read-only` is advisory (no edits). Defaults to GASLAMP_SANDBOX (" + DEFAULT_SANDBOX + ").";
+  "Permission override. Omit to use the user's own Claude config (their permission " +
+  "default, allow/deny rules, model, MCP) — this is the default. `read-only` forces " +
+  "an advisory, no-edit reviewer; `danger-full-access` forces full read/write. " +
+  "(Claude has no filesystem sandbox, so there is no honest `workspace-write`.)";
 
 const TOOLS = [
   {
@@ -129,10 +137,19 @@ const TOOLS = [
 ];
 
 function runClaude({ prompt, cwd, model, sandbox, resume }, id) {
-  const mode = SANDBOXES.includes(sandbox) ? sandbox : DEFAULT_SANDBOX;
+  const mode = SANDBOXES.includes(sandbox) ? sandbox : null; // null = defer to user's config
+  const modeLabel = mode || "user-config";
   const args = ["-p", prompt, "--output-format", "json"];
-  if (mode === "read-only") args.push("--allowedTools", ALLOWED_TOOLS);
-  else args.push("--dangerously-skip-permissions"); // workspace-write | danger-full-access
+  if (mode === "read-only") {
+    // --permission-mode default overrides the user's defaultMode (even bypass),
+    // and the allowlist restricts to read tools; anything else is denied in
+    // headless. A real read-only that holds regardless of the user's config.
+    args.push("--permission-mode", "default", "--allowedTools", ALLOWED_TOOLS);
+  } else if (mode === "danger-full-access") {
+    args.push("--dangerously-skip-permissions");
+  }
+  // else (omitted): pass no permission flag — the consulted Claude uses the
+  // user's own ~/.claude config, mirroring Codex deferring to config.toml.
   if (resume) args.push("--resume", resume);
   if (model) args.push("--model", model);
 
@@ -144,8 +161,8 @@ function runClaude({ prompt, cwd, model, sandbox, resume }, id) {
   delete env.ANTHROPIC_API_KEY;
 
   const t0 = Date.now();
-  log("spawn", CLAUDE_BIN, "mode=" + mode, "resume=" + (resume || "-"), "cwd=" + (cwd || process.cwd()));
-  transcript(`→ codex asks claude${resume ? " (reply " + resume.slice(0, 8) + ")" : ""} [${mode}] @ ${cwd || process.cwd()}: ${clip(prompt)}`);
+  log("spawn", CLAUDE_BIN, "mode=" + modeLabel, "resume=" + (resume || "-"), "cwd=" + (cwd || process.cwd()));
+  transcript(`→ codex asks claude${resume ? " (reply " + resume.slice(0, 8) + ")" : ""} [${modeLabel}] @ ${cwd || process.cwd()}: ${clip(prompt)}`);
   const child = spawn(CLAUDE_BIN, args, { cwd: cwd || process.cwd(), env, stdio: ["ignore", "pipe", "pipe"] });
 
   let out = "", err = "", done = false;
@@ -219,7 +236,7 @@ export function startServer() {
     }
   });
   process.stdin.on("end", () => process.exit(0));
-  log("ready; claude=" + CLAUDE_BIN + " default-sandbox=" + DEFAULT_SANDBOX + " version=" + VERSION);
+  log("ready; claude=" + CLAUDE_BIN + " version=" + VERSION);
 }
 
-export { VERSION, TOOLS, DEFAULT_SANDBOX };
+export { VERSION, TOOLS };

@@ -19,13 +19,12 @@ const PKG = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 // A fake `claude` that emits the JSON shape `claude -p ... --output-format json`
 // produces: a single result object with `result`, `session_id`, `is_error`.
 const STUB = `#!/usr/bin/env node
-let prompt = "";
 const a = process.argv.slice(2);
 const i = a.indexOf("-p");
-if (i >= 0 && a[i + 1]) prompt = a[i + 1];
+const prompt = i >= 0 && a[i + 1] ? a[i + 1] : "";
 process.stdout.write(JSON.stringify({
   type: "result",
-  result: "stub ok: " + prompt,
+  result: "stub ok: " + prompt + " || argv: " + JSON.stringify(a),
   session_id: "sess-123",
   is_error: false,
 }));
@@ -111,6 +110,33 @@ test("tools/call gaslamp-reply preserves the session id", async () => {
   });
   assert.equal(r.result.structuredContent.sessionId, "sess-123");
   assert.match(r.result.structuredContent.content, /stub ok: again/);
+});
+
+test("omitted sandbox passes no permission flag (defers to the user's config)", async () => {
+  const r = await rpc.request("tools/call", { name: "gaslamp", arguments: { prompt: "p" } });
+  const c = r.result.structuredContent.content;
+  assert.doesNotMatch(c, /--dangerously-skip-permissions/);
+  assert.doesNotMatch(c, /--permission-mode/);
+});
+
+test("read-only override forces --permission-mode default + allowlist", async () => {
+  const r = await rpc.request("tools/call", { name: "gaslamp", arguments: { prompt: "p", sandbox: "read-only" } });
+  const c = r.result.structuredContent.content;
+  assert.match(c, /--permission-mode/);
+  assert.match(c, /--allowedTools/);
+  assert.doesNotMatch(c, /--dangerously-skip-permissions/);
+});
+
+test("danger-full-access override forces --dangerously-skip-permissions", async () => {
+  const r = await rpc.request("tools/call", { name: "gaslamp", arguments: { prompt: "p", sandbox: "danger-full-access" } });
+  assert.match(r.result.structuredContent.content, /--dangerously-skip-permissions/);
+});
+
+test("unknown sandbox value falls back to the user's config (no flag)", async () => {
+  const r = await rpc.request("tools/call", { name: "gaslamp", arguments: { prompt: "p", sandbox: "workspace-write" } });
+  const c = r.result.structuredContent.content;
+  assert.doesNotMatch(c, /--dangerously-skip-permissions/);
+  assert.doesNotMatch(c, /--permission-mode/);
 });
 
 test("missing required arg is a JSON-RPC error", async () => {
