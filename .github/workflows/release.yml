@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Single in-flight release at a time. If two version bumps land back to back the
+# second waits for the first rather than racing to the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Must match the GitHub Actions trusted-publisher config on npmjs.com
+    # (org/repo/workflow/environment are all case-sensitive there).
+    environment: npm
+    permissions:
+      contents: write   # tag + GH release
+      id-token: write   # npm trusted publishing (OIDC) + provenance
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Read version from package.json
+        id: ver
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Each release artifact (npm version, git tag, GH release) is checked
+      # independently so a partial-failure run resumes cleanly: a step is skipped
+      # only if its own artifact already exists, never gated on a sibling.
+      - name: Resolve what already exists
+        id: state
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if npm view "gaslamp@$VERSION" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure npm >= 11.5.1 (required for trusted publishing)
+        if: steps.state.outputs.published == 'false'
+        run: npm install -g npm@latest
+
+      - name: Test before publish
+        if: steps.state.outputs.published == 'false'
+        run: npm test
+
+      - name: Publish to npm (trusted publishing / OIDC)
+        # No NODE_AUTH_TOKEN: with a configured trusted publisher npm authenticates
+        # via the OIDC id-token and attaches provenance automatically.
+        if: steps.state.outputs.published == 'false'
+        run: npm publish
+
+      - name: Create and push tag
+        if: steps.state.outputs.tagged == 'false'
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Create GitHub release
+        if: steps.state.outputs.released == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: gh release create "v$VERSION" --generate-notes

@@ -1,5 +1,4 @@
-#!/usr/bin/env node
-// gaslamp.mjs — let Codex consult Claude over MCP, built as a mirror image of
+// server.mjs — let Codex consult Claude over MCP, built as a mirror image of
 // Codex's native `codex mcp-server` so the two directions are symmetric. Either
 // agent can hand work to the other for a review, a second opinion, or a fix.
 //
@@ -27,9 +26,21 @@
 // Zero dependencies. Newline-delimited JSON-RPC over stdio (MCP stdio transport).
 
 import { spawn } from "node:child_process";
-import { existsSync, appendFileSync } from "node:fs";
+import { existsSync, appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Single source of truth for the version: package.json. Read at runtime (rather
+// than imported with an attribute) so it works across the whole engines range.
+const VERSION = (() => {
+  try {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+    return JSON.parse(readFileSync(pkgPath, "utf8")).version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 const SANDBOXES = ["read-only", "workspace-write", "danger-full-access"];
 const DEFAULT_SANDBOX = SANDBOXES.includes(process.env.GASLAMP_SANDBOX)
@@ -165,7 +176,7 @@ function handle(msg) {
     reply(id, {
       protocolVersion: params?.protocolVersion || "2025-06-18",
       capabilities: { tools: {} },
-      serverInfo: { name: "gaslamp", title: "Claude", version: "0.2.0" },
+      serverInfo: { name: "gaslamp", title: "Claude", version: VERSION },
     });
   } else if (method?.startsWith("notifications/")) {
     /* no response to notifications */
@@ -190,19 +201,25 @@ function handle(msg) {
   }
 }
 
-// ---- stdin loop -------------------------------------------------------------
-let buf = "";
-process.stdin.on("data", (d) => {
-  buf += d.toString();
-  let i;
-  while ((i = buf.indexOf("\n")) >= 0) {
-    const line = buf.slice(0, i).trim();
-    buf = buf.slice(i + 1);
-    if (!line) continue;
-    log("recv", line.slice(0, 300));
-    try { handle(JSON.parse(line)); }
-    catch (e) { log("parse error", e.message, "on", line.slice(0, 120)); }
-  }
-});
-process.stdin.on("end", () => process.exit(0));
-log("ready; claude=" + CLAUDE_BIN + " default-sandbox=" + DEFAULT_SANDBOX);
+// ---- stdio loop -------------------------------------------------------------
+// Start the MCP server: read newline-delimited JSON-RPC on stdin, write
+// responses on stdout. Blocks (keeps the process alive) until stdin closes.
+export function startServer() {
+  let buf = "";
+  process.stdin.on("data", (d) => {
+    buf += d.toString();
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (!line) continue;
+      log("recv", line.slice(0, 300));
+      try { handle(JSON.parse(line)); }
+      catch (e) { log("parse error", e.message, "on", line.slice(0, 120)); }
+    }
+  });
+  process.stdin.on("end", () => process.exit(0));
+  log("ready; claude=" + CLAUDE_BIN + " default-sandbox=" + DEFAULT_SANDBOX + " version=" + VERSION);
+}
+
+export { VERSION, TOOLS, DEFAULT_SANDBOX };

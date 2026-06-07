@@ -22,14 +22,14 @@ Two directions, two mechanisms. Both servers are registered under the name
 | direction | mechanism | what the agent calls |
 |-----------|-----------|----------------------|
 | **Claude → Codex** | Codex's native `codex mcp-server`, registered in Claude | `gaslamp/codex`, `gaslamp/codex-reply` |
-| **Codex → Claude** | `gaslamp.mjs` (this repo), registered in Codex | `gaslamp`, `gaslamp-reply` |
+| **Codex → Claude** | `src/server.mjs` (this repo), registered in Codex | `gaslamp`, `gaslamp-reply` |
 
 Only the Codex→Claude side needs custom code, because `claude mcp serve` exposes
 Claude's *tools* (Bash/Read/Edit) and a one-shot `Agent` spawn — not a persistent
-"consult Claude" conversation. `gaslamp.mjs` is that missing piece: a zero-dep
+"consult Claude" conversation. `src/server.mjs` is that missing piece: a zero-dep
 stdio MCP server that wraps `claude -p`.
 
-`gaslamp.mjs` flow on a `gaslamp` / `gaslamp-reply` call:
+`src/server.mjs` flow on a `gaslamp` / `gaslamp-reply` call:
 
 1. Spawn `claude -p <prompt> --output-format json` (`--resume <id>` on reply).
 2. Map the per-call `sandbox` (same enum as Codex) to a permission flag:
@@ -76,18 +76,27 @@ the user's `~/.codex/config.toml` `sandbox_mode`.
 
 ## Working on it
 
-Zero dependencies; system `node` runs `gaslamp.mjs`. No build step.
+Zero dependencies; system `node` runs everything. No build step. The CLI entry
+is `bin/gaslamp.mjs` (dispatches `serve` / `setup` / `doctor`); the server lives
+in `src/server.mjs`.
 
 Register / re-register both directions (idempotent; also clears legacy names):
 
 ```sh
-./setup.sh
+./setup.sh                 # from-source: gaslamp setup --local
+# or, on an installed copy:
+gaslamp setup              # registers Codex to spawn `npx -y gaslamp serve`
+gaslamp doctor             # verify binaries + registrations
 ```
 
-Then restart Claude Code so it loads the server. Re-run after an nvm node/codex
-upgrade — the registrations use absolute, version-pinned paths.
+Then restart Claude Code so it loads the server. The from-source registration is
+version-pinned to this checkout (re-run after an nvm node upgrade); the published
+`npx`-based registration is not, so it survives upgrades.
 
-Quick syntax check: `node -c gaslamp.mjs`.
+```sh
+npm run check              # node -c syntax check on every source file
+npm test                  # node --test against a stub claude binary
+```
 
 To exercise a server by hand, speak newline-delimited JSON-RPC over stdio:
 `initialize` → `notifications/initialized` → `tools/list` → `tools/call`. The
@@ -98,8 +107,14 @@ cwd, or the approval elicitation will stall it). Watch progress with
 
 ## Files
 
-- `gaslamp.mjs` — the MCP server (zero deps, stdio JSON-RPC)
-- `setup.sh` — registers both directions
+- `bin/gaslamp.mjs` — CLI entry; dispatches `serve` / `setup` / `doctor`
+- `src/server.mjs` — the MCP server (zero deps, stdio JSON-RPC)
+- `src/setup.mjs` — registers both directions (`--local` for this checkout)
+- `src/doctor.mjs` — non-invasive health check (binaries + registrations)
+- `src/which.mjs` — PATH lookup without spawning a shell
+- `tests/smoke.test.mjs` — drives the server over stdio against a stub `claude`
+- `setup.sh` — thin from-source wrapper around `gaslamp setup --local`
+- `package.json` — npm metadata; version is the single source of truth
 - `README.md` — front-page usage
 
 ## Env knobs (Codex-side `gaslamp` registration)

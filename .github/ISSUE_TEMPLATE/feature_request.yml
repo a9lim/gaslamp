@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest a new capability or improvement
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Note: the MCP tool surface (`gaslamp`, `gaslamp-reply`) is deliberately a
+        mirror of `codex mcp-server` and won't grow without a strong reason — the
+        symmetry between the two directions is the whole design. CLI subcommands,
+        setup ergonomics, and docs are much more likely to land. See CONTRIBUTING.md.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that gaslamp doesn't support today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would it work? A CLI sketch or tool-call example is welcome.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface does this touch?
+      options:
+        - CLI subcommand (setup / doctor / new)
+        - server behavior (sandbox mapping, auth, logging)
+        - MCP tool surface (please justify vs. the Codex mirror)
+        - docs only
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

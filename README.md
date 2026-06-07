@@ -1,8 +1,15 @@
 # gaslamp
 
-Hand work between Claude Code and Codex over MCP. Either agent can pass the lamp
+[![CI](https://github.com/a9lim/gaslamp/actions/workflows/ci.yml/badge.svg)](https://github.com/a9lim/gaslamp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/gaslamp)](https://www.npmjs.com/package/gaslamp)
+[![npm downloads](https://img.shields.io/npm/dm/gaslamp)](https://www.npmjs.com/package/gaslamp)
+[![node](https://img.shields.io/node/v/gaslamp)](https://www.npmjs.com/package/gaslamp)
+[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
+
+Pass the lamp between Claude Code and Codex over MCP. Either agent can hand work
 to the other for a review, a second opinion, or a fix — no tmux, no subagent
-middleman, no app-server broker. Both sides can **read and write**.
+middleman, no app-server broker. Both sides can **read and write**. Zero
+dependencies.
 
 ## Why this exists
 
@@ -12,26 +19,52 @@ That layering hangs ~half the time, and there's no reverse channel (Codex can't
 call Claude at all).
 
 Talking to `codex mcp-server` directly round-trips in ~5s with zero hangs — the
-hang was the broker + subagent layering, never Codex itself. So:
+hang was the broker + subagent layering, never Codex itself. So gaslamp deletes
+both layers and wires the two CLIs to each other as plain MCP servers:
 
 | direction | mechanism | what the agent calls |
 |-----------|-----------|----------------------|
 | **Claude → Codex** | `codex mcp-server` registered in Claude as `gaslamp` | `gaslamp/codex`, `gaslamp/codex-reply` |
-| **Codex → Claude** | `gaslamp.mjs` (this repo) registered in Codex as `gaslamp` | `gaslamp`, `gaslamp-reply` |
+| **Codex → Claude** | this package, registered in Codex as `gaslamp` | `gaslamp`, `gaslamp-reply` |
 
 `claude mcp serve` is *not* used for the reverse direction: it exposes Claude's
 *tools* (Bash/Read/Edit) and a one-shot `Agent` spawn, not a persistent
-conversation. Hence the thin shim.
+conversation. Hence the thin shim in `src/server.mjs`.
 
-## Setup
+## Requirements
+
+Both CLIs installed and logged in: [Claude Code](https://docs.claude.com/en/docs/claude-code)
+and [Codex](https://github.com/openai/codex). Node ≥ 18.
+
+## Install
 
 ```sh
-./setup.sh        # registers both directions as `gaslamp`
+npm install -g gaslamp
+gaslamp setup           # register both directions
+gaslamp doctor          # verify binaries + registrations
 ```
 
 Then **restart Claude Code** (or start a new session) so it loads the server.
-The Codex side is live immediately. Verify with `codex mcp list` / `claude mcp list`.
-Re-run `setup.sh` after an `nvm` node/codex upgrade (paths are version-pinned).
+The Codex side is live immediately.
+
+Zero-install also works — `gaslamp setup` registers Codex to spawn
+`npx -y gaslamp serve`, so there's no absolute, version-pinned path to break when
+you upgrade node:
+
+```sh
+npx gaslamp setup
+```
+
+### From source
+
+```sh
+git clone https://github.com/a9lim/gaslamp
+cd gaslamp
+./setup.sh              # === node bin/gaslamp.mjs setup --local
+```
+
+`--local` registers *this checkout* (`node …/bin/gaslamp.mjs serve`) instead of
+the published package — use it before the package is published, or for dev.
 
 ## Using it
 
@@ -54,6 +87,16 @@ Codex→Claude consultations are appended to `~/.codex/gaslamp.log`:
 `tail -f ~/.codex/gaslamp.log` is the lightweight "watch them talk" view.
 (Only the Codex→Claude direction is logged here; the other direction goes
 through Codex's native server.)
+
+## CLI
+
+```
+gaslamp [serve]        Run the MCP server on stdio (what Codex spawns).
+gaslamp setup          Register both directions (add --local for this checkout).
+gaslamp doctor         Check binaries + registrations (no round-trip).
+gaslamp --version      Print the version.
+gaslamp --help         Print help.
+```
 
 ## Design decisions
 
@@ -79,9 +122,8 @@ Codex requires **approval** for MCP tool calls — a separate gate from
 `approval_policy` (which only covers shell commands). It's auto-granted in
 **trusted** project dirs (`[projects."…"] trust_level = "trusted"` in
 `~/.codex/config.toml`); in an untrusted dir Codex shows a one-time approval
-prompt (approve "always" to persist). All of `~/Work` is trusted, so real
-consultations just work. If a `gaslamp` call from Codex stalls, check the cwd is
-under a trusted project.
+prompt (approve "always" to persist). If a `gaslamp` call from Codex stalls,
+check the cwd is under a trusted project.
 
 ## Env knobs (on the Codex-side `gaslamp` registration)
 
@@ -93,7 +135,21 @@ under a trusted project.
 | `GASLAMP_DEBUG` | unset | verbose stderr (raw JSON-RPC) |
 | `CLAUDE_BIN` | autodetected | path to the `claude` binary |
 
-## Files
+## Development
 
-- `gaslamp.mjs` — the MCP server (zero deps, stdio JSON-RPC)
-- `setup.sh` — registers both directions
+Zero dependencies; system `node` runs everything. No build step.
+
+```sh
+npm test                # node --test against a stub claude binary
+npm run check           # node -c syntax check on every source file
+```
+
+To exercise the server by hand, speak newline-delimited JSON-RPC over stdio:
+`initialize` → `notifications/initialized` → `tools/list` → `tools/call`.
+
+See [AGENTS.md](AGENTS.md) for the architecture deep-dive and
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a PR.
+
+## License
+
+AGPL-3.0-or-later. See [LICENSE](LICENSE).

@@ -1,0 +1,71 @@
+name: Bug report
+description: A consult hung, crashed, or behaved wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: if a consult from **Codex** hangs with no response, the cwd is
+        very likely untrusted — see the directory-trust note in the README. Run
+        `gaslamp doctor` first; it catches most setup problems.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what did you get?
+    validations:
+      required: true
+
+  - type: input
+    id: gaslamp-version
+    attributes:
+      label: gaslamp version
+      description: Output of `gaslamp --version`
+      placeholder: 0.3.0
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node version
+      description: Output of `node --version`
+      placeholder: v22.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Which direction?
+      options:
+        - Codex → Claude (calling `gaslamp` / `gaslamp-reply`)
+        - Claude → Codex (calling `gaslamp/codex` / `gaslamp/codex-reply`)
+        - setup / registration
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: gaslamp doctor output
+      description: Paste the output of `gaslamp doctor`.
+      render: shell
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The shortest tool call or command sequence that reproduces it. Please don't paste secrets.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Transcript / debug log
+      description: Relevant lines from `~/.codex/gaslamp.log`, or stderr with `GASLAMP_DEBUG=1`.
+      render: shell

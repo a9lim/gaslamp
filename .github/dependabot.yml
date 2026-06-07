@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Only GitHub Actions — gaslamp has zero runtime/dev npm dependencies, so there
+  # is no package ecosystem to watch.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["18", "20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Tests
+        run: npm test
+
+  package:
+    # Validates the published tarball: correct file list, installs clean as a
+    # global, and the console script actually runs. If this is green the release
+    # workflow can publish blind.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Pack
+        run: npm pack
+
+      - name: Install the packed tarball globally
+        run: npm install -g ./gaslamp-*.tgz
+
+      - name: Verify the installed CLI
+        run: |
+          gaslamp --version
+          gaslamp --help | grep -q "gaslamp setup"
