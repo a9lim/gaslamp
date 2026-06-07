@@ -22,7 +22,7 @@ body:
     attributes:
       label: gaslamp version
       description: Output of `gaslamp --version`
-      placeholder: 0.3.0
+      placeholder: 1.0.0
     validations:
       required: true
 
