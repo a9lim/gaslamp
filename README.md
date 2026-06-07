@@ -35,9 +35,10 @@ Re-run `setup.sh` after an `nvm` node/codex upgrade (paths are version-pinned).
 
 ## Using it
 
-- **From Codex:** call `gaslamp` with a `prompt` (and optional `cwd`, `model`).
-  Claude works in `cwd` with full read/write and returns a summary. The result's
-  `structuredContent.sessionId` feeds `gaslamp-reply` to continue.
+- **From Codex:** call `gaslamp` with a `prompt` (and optional `cwd`, `model`,
+  `sandbox`). Claude works in `cwd` with full read/write by default and returns a
+  summary; pass `sandbox: "read-only"` for an advisory, no-edit reviewer. The
+  result's `structuredContent.sessionId` feeds `gaslamp-reply` to continue.
 - **From Claude:** call `gaslamp/codex`. Codex reads and writes by default,
   following your `~/.codex/config.toml` `sandbox_mode` (full read/write when it's
   `workspace-write` or `danger-full-access`). Pass a `sandbox` arg to override per
@@ -56,14 +57,21 @@ through Codex's native server.)
 
 ## Design decisions
 
-- **Read/write by default.** The consulted Claude can edit files in `cwd`
-  (`--dangerously-skip-permissions`, matching the full-access posture Codex
-  already runs with). Set `GASLAMP_READONLY=1` for an advisory, no-edit reviewer.
-- **No recursion.** Claude is launched with `--strict-mcp-config` + an empty MCP
-  config, so a consulted Claude has *no* MCP servers — it can't pass the lamp
-  back into Codex, and it stays lean.
-- **OAuth, not API key.** The shim strips `ANTHROPIC_API_KEY` from the child env
-  so Claude uses keychain OAuth.
+- **Mirrors `codex mcp-server`.** Same interface shape as the Codex→Claude
+  reference: a per-call `sandbox` arg (`read-only` | `workspace-write` |
+  `danger-full-access`), defaulting to `GASLAMP_SANDBOX` the way Codex defaults to
+  `sandbox_mode` in `config.toml`. No bespoke timeout and no recursion isolation —
+  a consulted Claude inherits the parent env and loads your full config/MCP, just
+  as a consulted Codex does.
+- **Sandbox mapping.** Claude has no filesystem-scoped sandbox, so `workspace-write`
+  and `danger-full-access` both grant full read/write
+  (`--dangerously-skip-permissions`); `read-only` restricts to a read-only tool
+  allowlist (advisory reviewer). All three values are accepted for parity with
+  Codex; the latter two map alike.
+- **OAuth, not API key.** The shim strips `ANTHROPIC_API_KEY` from the child env so
+  Claude authenticates via keychain OAuth. This is kept despite the mirror goal: it
+  has no Codex analog (Codex never reads that var), and without it a stale env key
+  401s every consultation.
 
 ## ⚠️ Directory trust gates Codex→Claude
 
@@ -79,9 +87,8 @@ under a trusted project.
 
 | var | default | meaning |
 |-----|---------|---------|
-| `GASLAMP_READONLY` | unset | `1` → advisory, no-edit reviewer |
-| `GASLAMP_ALLOWED_TOOLS` | read-only set | tools when `GASLAMP_READONLY=1` |
-| `GASLAMP_TIMEOUT_MS` | `600000` | per-consultation timeout |
+| `GASLAMP_SANDBOX` | `workspace-write` | default sandbox when a call omits `sandbox` (`read-only` = advisory reviewer) |
+| `GASLAMP_ALLOWED_TOOLS` | read-only set | tools available under the `read-only` sandbox |
 | `GASLAMP_LOGFILE` | `~/.codex/gaslamp.log` | transcript path; `off` to disable |
 | `GASLAMP_DEBUG` | unset | verbose stderr (raw JSON-RPC) |
 | `CLAUDE_BIN` | autodetected | path to the `claude` binary |
@@ -89,5 +96,4 @@ under a trusted project.
 ## Files
 
 - `gaslamp.mjs` — the MCP server (zero deps, stdio JSON-RPC)
-- `empty-mcp.json` — the empty MCP config handed to the consulted Claude
 - `setup.sh` — registers both directions

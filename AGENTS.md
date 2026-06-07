@@ -32,13 +32,23 @@ stdio MCP server that wraps `claude -p`.
 `gaslamp.mjs` flow on a `gaslamp` / `gaslamp-reply` call:
 
 1. Spawn `claude -p <prompt> --output-format json` (`--resume <id>` on reply).
-2. `--strict-mcp-config --mcp-config empty-mcp.json` so the consulted Claude has
-   **no MCP servers** — it can't loop back into Codex, and it stays lean.
-3. `--dangerously-skip-permissions` so Claude can edit in `cwd` (or
-   `--allowedTools <read-only set>` when `GASLAMP_READONLY=1`).
-4. Strip `ANTHROPIC_API_KEY` from the child env so Claude uses keychain OAuth
-   rather than a (possibly stale) env key.
-5. Parse the result JSON, return `{ content, structuredContent: { sessionId } }`.
+2. Map the per-call `sandbox` (same enum as Codex) to a permission flag:
+   `read-only` → `--allowedTools <read-only set>`; `workspace-write` /
+   `danger-full-access` → `--dangerously-skip-permissions`. The default comes from
+   `GASLAMP_SANDBOX`, mirroring Codex reading `sandbox_mode` from config.toml.
+3. Strip `ANTHROPIC_API_KEY` from the child env so Claude uses keychain OAuth
+   rather than a (possibly stale) env key. This is the *one* Claude-only step
+   with no Codex analog (Codex never reads that var), so it isn't an asymmetry —
+   it's what makes Claude's auth reliable. Verified: with the key left in, a stale
+   value 401s every call (`Invalid API key`).
+4. Parse the result JSON, return
+   `{ content, structuredContent: { sessionId, content } }`.
+
+Otherwise the consulted Claude is deliberately un-isolated — it inherits the
+parent env and loads the user's full config/MCP (the whole toolbelt, and it *can*
+now consult Codex back), with no bespoke timeout — exactly as a consulted Codex
+is. That symmetry is the design goal; any loop only closes if the agents choose to
+keep handing off.
 
 The Claude→Codex side needs no wrapper: `codex mcp-server`'s `codex` tool returns
 `structuredContent.threadId` for `codex-reply`, and it reads/writes according to
@@ -89,7 +99,6 @@ cwd, or the approval elicitation will stall it). Watch progress with
 ## Files
 
 - `gaslamp.mjs` — the MCP server (zero deps, stdio JSON-RPC)
-- `empty-mcp.json` — the empty MCP config handed to the consulted Claude
 - `setup.sh` — registers both directions
 - `README.md` — front-page usage
 
@@ -97,9 +106,8 @@ cwd, or the approval elicitation will stall it). Watch progress with
 
 | var | default | meaning |
 |-----|---------|---------|
-| `GASLAMP_READONLY` | unset | `1` → advisory, no-edit reviewer |
-| `GASLAMP_ALLOWED_TOOLS` | read-only set | tools when `GASLAMP_READONLY=1` |
-| `GASLAMP_TIMEOUT_MS` | `600000` | per-consultation timeout |
+| `GASLAMP_SANDBOX` | `workspace-write` | default sandbox when a call omits `sandbox` (`read-only` = advisory reviewer) |
+| `GASLAMP_ALLOWED_TOOLS` | read-only set | tools available under the `read-only` sandbox |
 | `GASLAMP_LOGFILE` | `~/.codex/gaslamp.log` | transcript path; `off` to disable |
 | `GASLAMP_DEBUG` | unset | verbose stderr (raw JSON-RPC) |
 | `CLAUDE_BIN` | autodetected | path to the `claude` binary |

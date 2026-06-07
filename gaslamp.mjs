@@ -1,37 +1,40 @@
 #!/usr/bin/env node
-// gaslamp.mjs — let Codex consult Claude over MCP (the reverse of Claude→Codex,
-// which uses Codex's native `codex mcp-server`). Together: either agent can hand
-// work to the other for a review, a second opinion, or a fix.
+// gaslamp.mjs — let Codex consult Claude over MCP, built as a mirror image of
+// Codex's native `codex mcp-server` so the two directions are symmetric. Either
+// agent can hand work to the other for a review, a second opinion, or a fix.
 //
-// Tools exposed to Codex:
-//   gaslamp        hand off to a fresh Claude session (review / fix / second opinion)
+// Tools exposed to Codex (mirror of codex / codex-reply):
+//   gaslamp        start a Claude session (review / fix / second opinion)
 //   gaslamp-reply  continue a prior consultation by sessionId
 //
-// Design:
-//   - Read/write by default: the consulted Claude can edit files in `cwd`
-//     (--dangerously-skip-permissions). Set GASLAMP_READONLY=1 for an advisory,
-//     no-edit reviewer instead.
-//   - No recursion: Claude is launched with --strict-mcp-config + an empty MCP
-//     config, so a consulted Claude has no MCP servers (can't loop back into
-//     Codex) and stays lean.
-//   - Strips ANTHROPIC_API_KEY from the child env so Claude uses keychain OAuth.
+// Symmetry with `codex mcp-server`:
+//   - Per-call `sandbox` arg with the same enum as Codex:
+//     `read-only` | `workspace-write` | `danger-full-access`. The default when a
+//     call omits it comes from GASLAMP_SANDBOX, analogous to Codex reading
+//     `sandbox_mode` from config.toml.
+//   - No bespoke timeout, no auth shim, no recursion isolation — a consulted
+//     Claude inherits the parent env and loads the user's full config/MCP,
+//     exactly as a consulted Codex does.
+//
+// Claude has no filesystem-scoped sandbox, so Codex's three levels collapse to
+// two honest ones: `read-only` → a read-only tool allowlist (advisory reviewer);
+// `workspace-write` / `danger-full-access` → full read/write
+// (--dangerously-skip-permissions). We accept all three values for interface
+// parity and map the latter two the same way.
 //
 // Zero dependencies. Newline-delimited JSON-RPC over stdio (MCP stdio transport).
 
 import { spawn } from "node:child_process";
-import { existsSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const EMPTY_MCP = join(HERE, "empty-mcp.json");
-if (!existsSync(EMPTY_MCP)) writeFileSync(EMPTY_MCP, JSON.stringify({ mcpServers: {} }));
-
-const READONLY = !!process.env.GASLAMP_READONLY;
+const SANDBOXES = ["read-only", "workspace-write", "danger-full-access"];
+const DEFAULT_SANDBOX = SANDBOXES.includes(process.env.GASLAMP_SANDBOX)
+  ? process.env.GASLAMP_SANDBOX
+  : "workspace-write";
 const ALLOWED_TOOLS = process.env.GASLAMP_ALLOWED_TOOLS ||
   "Read Grep Glob WebFetch WebSearch Bash(git *)";
-const CALL_TIMEOUT_MS = Number(process.env.GASLAMP_TIMEOUT_MS) || 600_000;
 const DEBUG = !!process.env.GASLAMP_DEBUG;
 
 // Persistent consultation transcript (the lightweight "watch them talk" log).
@@ -55,64 +58,85 @@ function send(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
 function reply(id, result) { send({ jsonrpc: "2.0", id, result }); }
 function fail(id, code, message) { send({ jsonrpc: "2.0", id, error: { code, message } }); }
 
-const CAP = READONLY
-  ? "investigates read-only (Read/Grep/Glob/git/web) and returns findings as text — it does NOT edit"
-  : "can read AND edit files in `cwd` (full read/write), and returns a summary of what it found or changed";
+// Mirrors codex's `{ threadId, content }` outputSchema. sessionId may be null on
+// a hard failure, so only `content` is required.
+const OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    sessionId: { type: "string", description: "The Claude session id; pass to gaslamp-reply to continue." },
+    content: { type: "string" },
+  },
+  required: ["content"],
+};
+
+const SANDBOX_DESC =
+  "Sandbox mode: `read-only`, `workspace-write`, or `danger-full-access`. " +
+  "Claude has no filesystem sandbox, so the latter two both grant full read/write; " +
+  "`read-only` is advisory (no edits). Defaults to GASLAMP_SANDBOX (" + DEFAULT_SANDBOX + ").";
 
 const TOOLS = [
   {
     name: "gaslamp",
+    title: "Claude",
     description:
-      `Hand off to a fresh Claude Code session for a code review, second opinion, or fix. Claude ${CAP}. ` +
-      "Returns a sessionId; pass it to gaslamp-reply to continue the same thread with full context.",
+      "Start a Claude Code session for a code review, second opinion, or fix. Claude works in " +
+      "`cwd` and returns a summary of what it found or changed. Returns a sessionId; pass it to " +
+      "gaslamp-reply to continue the same thread with full context.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,
       properties: {
-        prompt: { type: "string", description: "What you want Claude to review, check, or do. Include the relevant context/paths." },
-        cwd: { type: "string", description: "Absolute path to work in (the repo/dir). Defaults to the shim's cwd." },
-        model: { type: "string", description: "Optional Claude model id. Omit to use the account default." },
+        prompt: { type: "string", description: "The initial prompt for Claude. Include the relevant context/paths." },
+        cwd: { type: "string", description: "Working directory for the session. If relative, resolved against the server process's cwd." },
+        model: { type: "string", description: "Optional Claude model id or alias (e.g. 'sonnet', 'opus'). Omit for the account default." },
+        sandbox: { type: "string", enum: SANDBOXES, description: SANDBOX_DESC },
       },
       required: ["prompt"],
     },
+    outputSchema: OUTPUT_SCHEMA,
   },
   {
     name: "gaslamp-reply",
-    description: "Continue a previous Claude consultation by sessionId, preserving its context.",
+    title: "Claude Reply",
+    description: "Continue a Claude consultation by providing the sessionId and prompt, preserving its context.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,
       properties: {
         sessionId: { type: "string", description: "The sessionId returned by a prior gaslamp / gaslamp-reply call." },
-        prompt: { type: "string", description: "Your follow-up for Claude." },
-        cwd: { type: "string", description: "Absolute path to work in. Defaults to the shim's cwd." },
-        model: { type: "string", description: "Optional Claude model id." },
+        prompt: { type: "string", description: "The next prompt to continue the Claude conversation." },
+        cwd: { type: "string", description: "Working directory. If relative, resolved against the server process's cwd." },
+        model: { type: "string", description: "Optional Claude model id or alias." },
+        sandbox: { type: "string", enum: SANDBOXES, description: SANDBOX_DESC },
       },
       required: ["sessionId", "prompt"],
     },
+    outputSchema: OUTPUT_SCHEMA,
   },
 ];
 
-function runClaude({ prompt, cwd, model, resume }, id) {
-  const args = ["-p", prompt, "--output-format", "json", "--strict-mcp-config", "--mcp-config", EMPTY_MCP];
-  if (READONLY) args.push("--allowedTools", ALLOWED_TOOLS);
-  else args.push("--dangerously-skip-permissions");
+function runClaude({ prompt, cwd, model, sandbox, resume }, id) {
+  const mode = SANDBOXES.includes(sandbox) ? sandbox : DEFAULT_SANDBOX;
+  const args = ["-p", prompt, "--output-format", "json"];
+  if (mode === "read-only") args.push("--allowedTools", ALLOWED_TOOLS);
+  else args.push("--dangerously-skip-permissions"); // workspace-write | danger-full-access
   if (resume) args.push("--resume", resume);
   if (model) args.push("--model", model);
 
+  // Strip ANTHROPIC_API_KEY so the consulted Claude authenticates via keychain
+  // OAuth. This has no Codex analog (Codex doesn't read this var), so it isn't an
+  // asymmetry — it's what makes Claude's auth "just work" from its keychain the
+  // way Codex's does. A stale/invalid env key would otherwise 401 every call.
   const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY; // force keychain OAuth
+  delete env.ANTHROPIC_API_KEY;
 
   const t0 = Date.now();
-  log("spawn", CLAUDE_BIN, "resume=" + (resume || "-"), "cwd=" + (cwd || process.cwd()));
-  transcript(`→ codex asks claude${resume ? " (reply " + resume.slice(0, 8) + ")" : ""} @ ${cwd || process.cwd()}: ${clip(prompt)}`);
+  log("spawn", CLAUDE_BIN, "mode=" + mode, "resume=" + (resume || "-"), "cwd=" + (cwd || process.cwd()));
+  transcript(`→ codex asks claude${resume ? " (reply " + resume.slice(0, 8) + ")" : ""} [${mode}] @ ${cwd || process.cwd()}: ${clip(prompt)}`);
   const child = spawn(CLAUDE_BIN, args, { cwd: cwd || process.cwd(), env, stdio: ["ignore", "pipe", "pipe"] });
 
   let out = "", err = "", done = false;
-  const finish = (fn) => { if (done) return; done = true; clearTimeout(timer); fn(); };
-  const timer = setTimeout(() => finish(() => {
-    child.kill("SIGKILL");
-    fail(id, -32000, `Claude consultation timed out after ${CALL_TIMEOUT_MS}ms`);
-  }), CALL_TIMEOUT_MS);
-
+  const finish = (fn) => { if (done) return; done = true; fn(); };
   child.stdout.on("data", (d) => (out += d));
   child.stderr.on("data", (d) => (err += d));
   child.on("error", (e) => finish(() => fail(id, -32000, `Failed to launch claude: ${e.message}`)));
@@ -127,7 +151,7 @@ function runClaude({ prompt, cwd, model, resume }, id) {
     transcript(`← claude ${isError ? "ERR" : "ok"} (${Date.now() - t0}ms, session ${sessionId ? sessionId.slice(0, 8) : "-"}): ${clip(text)}`);
     reply(id, {
       content: [{ type: "text", text: String(text) }],
-      structuredContent: { sessionId, content: String(text), isError },
+      structuredContent: { sessionId, content: String(text) },
       isError,
     });
   }));
@@ -139,7 +163,7 @@ function handle(msg) {
     reply(id, {
       protocolVersion: params?.protocolVersion || "2025-06-18",
       capabilities: { tools: {} },
-      serverInfo: { name: "gaslamp", version: "0.1.0" },
+      serverInfo: { name: "gaslamp", title: "Claude", version: "0.2.0" },
     });
   } else if (method?.startsWith("notifications/")) {
     /* no response to notifications */
@@ -152,10 +176,10 @@ function handle(msg) {
     const a = params?.arguments || {};
     if (name === "gaslamp") {
       if (!a.prompt) return fail(id, -32602, "missing required arg: prompt");
-      runClaude({ prompt: a.prompt, cwd: a.cwd, model: a.model }, id);
+      runClaude({ prompt: a.prompt, cwd: a.cwd, model: a.model, sandbox: a.sandbox }, id);
     } else if (name === "gaslamp-reply") {
       if (!a.sessionId || !a.prompt) return fail(id, -32602, "missing required arg: sessionId and/or prompt");
-      runClaude({ prompt: a.prompt, cwd: a.cwd, model: a.model, resume: a.sessionId }, id);
+      runClaude({ prompt: a.prompt, cwd: a.cwd, model: a.model, sandbox: a.sandbox, resume: a.sessionId }, id);
     } else {
       fail(id, -32601, `unknown tool: ${name}`);
     }
@@ -179,4 +203,4 @@ process.stdin.on("data", (d) => {
   }
 });
 process.stdin.on("end", () => process.exit(0));
-log("ready; claude=" + CLAUDE_BIN + " mode=" + (READONLY ? "readonly" : "read-write"));
+log("ready; claude=" + CLAUDE_BIN + " default-sandbox=" + DEFAULT_SANDBOX);
