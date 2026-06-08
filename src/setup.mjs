@@ -16,6 +16,8 @@
 //                            the package is published, or for from-source dev.
 
 import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { which } from "./which.mjs";
@@ -24,6 +26,45 @@ function run(label, cmd, args) {
   process.stdout.write(`  ${label}: ${cmd} ${args.join(" ")}\n`);
   const r = spawnSync(cmd, args, { stdio: "inherit" });
   return r.status === 0;
+}
+
+// `codex mcp add` cannot persist per-server timeouts (its `-c` flag is a runtime
+// override that never lands in the block), so we patch ~/.codex/config.toml
+// directly. Without this, Codex's MCP client kills any tools/call that runs past
+// its default tool_timeout_sec — a substantial consult (30-45 min) dies with
+// `timed out awaiting tools/call after 120s` while the gaslamp child keeps
+// working, orphaned. The server itself has no timeout; this is the client side.
+// Idempotent: sets the keys in-place if present, inserts them if not.
+function patchCodexTimeouts() {
+  const tool = process.env.GASLAMP_TOOL_TIMEOUT_SEC || "100000"; // ~27.8h — matches Claude Code's own default MCP tool timeout (1e8 ms), so both directions are symmetric
+  const startup = process.env.GASLAMP_STARTUP_TIMEOUT_SEC || "30"; // headroom for npx cold-start
+  const cfgPath = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
+
+  let text;
+  try { text = readFileSync(cfgPath, "utf8"); }
+  catch { console.warn(`  (could not read ${cfgPath}; skipped timeout patch)`); return; }
+
+  const lines = text.split("\n");
+  const header = lines.findIndex((l) => l.trim() === "[mcp_servers.gaslamp]");
+  if (header < 0) { console.warn("  (no [mcp_servers.gaslamp] block found; skipped timeout patch)"); return; }
+
+  // Block runs from the header to the next table header (line starting with `[`).
+  let end = lines.length;
+  for (let i = header + 1; i < lines.length; i++) { if (/^\s*\[/.test(lines[i])) { end = i; break; } }
+  const block = lines.slice(header, end);
+
+  const setKey = (key, val) => {
+    const i = block.findIndex((l) => new RegExp(`^\\s*${key}\\s*=`).test(l));
+    if (i >= 0) { block[i] = `${key} = ${val}`; return; }
+    let at = block.length;                       // insert before trailing blank lines
+    while (at > 1 && block[at - 1].trim() === "") at--;
+    block.splice(at, 0, `${key} = ${val}`);
+  };
+  setKey("tool_timeout_sec", tool);
+  setKey("startup_timeout_sec", startup);
+
+  writeFileSync(cfgPath, [...lines.slice(0, header), ...block, ...lines.slice(end)].join("\n"));
+  process.stdout.write(`  timeouts: tool_timeout_sec=${tool}s startup_timeout_sec=${startup}s in ${cfgPath}\n`);
 }
 
 // Quietly remove an existing registration (ignore "not found" noise).
@@ -62,6 +103,7 @@ export function runSetup(argv = []) {
     serveCmd = ["mcp", "add", "gaslamp", "--", "npx", "-y", "gaslamp", "serve"];
   }
   const okCodex = run("codex -> claude", "codex", serveCmd);
+  if (okCodex) patchCodexTimeouts(); // codex mcp add can't persist these; do it ourselves
 
   // --- Claude -> Codex: claude gets gaslamp's codex tools (user scope) --------
   remove("claude", "gaslamp", ["-s", "user"]);
