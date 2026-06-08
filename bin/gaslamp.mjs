@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// gaslamp: let Claude and Codex talk over MCP
+// gaslamp: Minimal MCP server that lets Claude and Codex talk to each other.
 //
 //   gaslamp            run the MCP server on stdio (what Codex spawns)
 //   gaslamp serve      same as above, explicit
@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
 
-const HELP = `gaslamp ${pkg.version}: let Claude and Codex talk over MCP
+const HELP = `gaslamp ${pkg.version}: Minimal MCP server that lets Claude and Codex talk to each other.
 
 Usage:
   gaslamp [serve]        Run the MCP server on stdio (what Codex spawns).

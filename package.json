@@ -1,7 +1,7 @@
 {
   "name": "gaslamp",
   "version": "1.0.1",
-  "description": "Pass the lamp between Claude Code and Codex over MCP — either agent can hand work to the other for a review, a second opinion, or a fix. Zero dependencies.",
+  "description": "Minimal MCP server that lets Claude and Codex talk to each other.",
   "type": "module",
   "bin": {
     "gaslamp": "bin/gaslamp.mjs"
