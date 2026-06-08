@@ -1,6 +1,6 @@
 {
   "name": "gaslamp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Pass the lamp between Claude Code and Codex over MCP — either agent can hand work to the other for a review, a second opinion, or a fix. Zero dependencies.",
   "type": "module",
   "bin": {

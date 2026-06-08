@@ -76,6 +76,31 @@ the user's `~/.codex/config.toml` `sandbox_mode`.
 - **OAuth vs API key.** A nested `claude -p` inherits the parent env; an
   `ANTHROPIC_API_KEY` there overrides keychain OAuth. If it's stale you get a
   401. The shim deletes it from the child env so OAuth is the source of truth.
+- **The timeout is Codex's, not the server's.** `src/server.mjs` deliberately has
+  no timeout — it waits for `claude -p` however long it takes. But Codex's MCP
+  *client* enforces a per-call `tool_timeout_sec` (docs say default 60s; observed
+  120s in codex-cli 0.137.0 / the desktop app) and kills any `tools/call` that
+  overruns it with `timed out awaiting tools/call after 120s` — while the gaslamp
+  child keeps running, orphaned (its result still lands in `gaslamp.log` when it
+  finishes; Codex just never receives it). Substantial consults run 30-45 min, so
+  this fires constantly. Two facts make the server powerless to fix it: `codex mcp
+  add` can't persist the key (its `-c` flag is runtime-only, never written to the
+  block), and Codex does **not** reset the deadline on `notifications/progress`
+  (verified in `codex-rs/rmcp-client`: the timeout only pauses for a pending
+  elicitation, never for progress) — so the server can't keep the call alive by
+  emitting heartbeats either. The fix lives entirely in `config.toml`:
+  `tool_timeout_sec` (+ `startup_timeout_sec` for the `npx -y` cold-start) under
+  `[mcp_servers.gaslamp]`. `gaslamp setup` now patches both in directly after
+  `codex mcp add` (see `patchCodexTimeouts` in `src/setup.mjs`); tune via
+  `GASLAMP_TOOL_TIMEOUT_SEC` / `GASLAMP_STARTUP_TIMEOUT_SEC`. The default is
+  `100000`s (≈27.8h), deliberately matching Claude Code's *own* default MCP tool
+  timeout — its stdio resolver falls back to `1e8` ms when `MCP_TOOL_TIMEOUT` is
+  unset (the docs' "about 28 hours"), and progress notifications don't extend it
+  there either. So both directions now share the same effectively-unbounded
+  ceiling; a genuinely wedged consult is the user's to cancel, not the client's to
+  guillotine at 2 minutes. Caveat: a re-run of the *published* `gaslamp setup`
+  only carries the patch once npm has a version with this `setup.mjs` — an older
+  published `mcp remove`+`add` wipes the keys.
 
 ## Working on it
 
@@ -128,3 +153,5 @@ cwd, or the approval elicitation will stall it). Watch progress with
 | `GASLAMP_LOGFILE` | `~/.codex/gaslamp.log` | transcript path; `off` to disable |
 | `GASLAMP_DEBUG` | unset | verbose stderr (raw JSON-RPC) |
 | `CLAUDE_BIN` | autodetected | path to the `claude` binary |
+| `GASLAMP_TOOL_TIMEOUT_SEC` | `100000` | *(setup-time)* `tool_timeout_sec` written to `[mcp_servers.gaslamp]`; how long Codex waits on one consult before killing it. Default ≈27.8h, chosen to match Claude Code's own default MCP tool timeout (`1e8` ms) so both directions behave the same |
+| `GASLAMP_STARTUP_TIMEOUT_SEC` | `30` | *(setup-time)* `startup_timeout_sec` written to the same block; headroom for the `npx -y` cold-start |
