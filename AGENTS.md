@@ -27,7 +27,13 @@ Two directions, two mechanisms. Both servers are registered under the name
 Only the Codex→Claude side needs custom code, because `claude mcp serve` exposes
 Claude's *tools* (Bash/Read/Edit) and a one-shot `Agent` spawn — not a persistent
 "consult Claude" conversation. `src/server.mjs` is that missing piece: a zero-dep
-stdio MCP server that wraps `claude -p`.
+stdio MCP server that wraps `claude -p`. It's a deliberate mirror of `codex
+mcp-server` down to the surface: the `gaslamp` / `gaslamp-reply` pair mirrors
+`codex` / `codex-reply` in tool shape, output schema (`{ sessionId, content }` ≈
+`{ threadId, content }`), titles (`Claude` / `Claude Reply`), and tool
+*descriptions* — Codex's are terse ("Run a Codex session. …"), so ours match that
+register rather than out-selling them (any "when to consult" guidance belongs in
+the agents' own config, not the tool blurb).
 
 `src/server.mjs` flow on a `gaslamp` / `gaslamp-reply` call:
 
@@ -48,10 +54,13 @@ stdio MCP server that wraps `claude -p`.
    `{ content, structuredContent: { sessionId, content } }`.
 
 Otherwise the consulted Claude is deliberately un-isolated — it inherits the
-parent env and loads the user's full config/MCP (the whole toolbelt, and it *can*
-now consult Codex back), with no bespoke timeout — exactly as a consulted Codex
-is. That symmetry is the design goal; any loop only closes if the agents choose to
-keep handing off.
+parent env and loads the user's full config/MCP (the whole toolbelt), with no
+bespoke timeout — exactly as a consulted Codex is. The **one** deliberate
+asymmetry-from-the-user is the recursion guard: a consult is one hop by default,
+so the consulted Claude is denied the Claude→Codex bridge and a consulted Codex
+is refused if it tries to hand work back (see "recursion guard" below).
+`GASLAMP_ALLOW_RECURSION=1` removes the guard and restores the old fully-symmetric
+behaviour, where any loop only closes if the agents choose to keep handing off.
 
 The Claude→Codex side needs no wrapper: `codex mcp-server`'s `codex` tool returns
 `structuredContent.threadId` for `codex-reply`, and it reads/writes according to
@@ -67,6 +76,23 @@ the user's `~/.codex/config.toml` `sandbox_mode`.
   from Codex stalls forever with no `mcp_tool_call_end`, the cwd is untrusted and
   an approval elicitation is sitting unanswered. This was the single hardest bug
   to find — the shim looks hung but never received the `tools/call`.
+- **The recursion guard is two halves, one per direction.** A consult is one hop
+  by default, but the two directions are blocked by different mechanisms because
+  only one side is our code. (1) *Nested Claude → Codex:* the `claude -p` in
+  `server.mjs` is always itself a consult, so it's spawned with
+  `--disallowedTools mcp__gaslamp` — a bare server name removes all of gaslamp's
+  tools from Claude's context, and a deny rule holds **even under
+  `--dangerously-skip-permissions`** (verified: deny > ask > allow, and deny
+  beats bypassPermissions). (2) *Nested Codex → Claude:* `codex mcp-server` is
+  native (not our code), so instead `gaslamp setup` registers it in Claude with
+  `--env GASLAMP_NESTED=1`; that env flows down to the `gaslamp serve` Codex
+  spawns, and `server.mjs` refuses any call when it sees the sentinel. The
+  top-level agent the user drives is spawned by neither path, so it keeps full
+  consult powers. `GASLAMP_ALLOW_RECURSION=1` disables both halves. Subtlety:
+  blocking nested Claude needs the *Claude* side (deny the tool), and blocking
+  nested Codex needs the *server* side (refuse the call) — an env sentinel alone
+  can't stop a Claude from invoking an MCP tool, and a deny flag has no analog we
+  can inject into native `codex mcp-server`.
 - **Why not tmux.** The original idea was to drive both TUIs via
   `send-keys`/`capture-pane`. That would mean screen-scraping two redrawing,
   alt-screen TUIs and heuristically detecting turn completion — brittle, and it
@@ -150,6 +176,8 @@ cwd, or the approval elicitation will stall it). Watch progress with
 | var | default | meaning |
 |-----|---------|---------|
 | `GASLAMP_ALLOWED_TOOLS` | `Read Grep Glob WebFetch WebSearch` | tools the `read-only` override permits |
+| `GASLAMP_ALLOW_RECURSION` | unset | disable the recursion guard — let a consulted agent consult back (off = one hop). Also recognised by the spawned Claude (drops `--disallowedTools mcp__gaslamp`) |
+| `GASLAMP_NESTED` | set by setup | sentinel the Claude→Codex registration puts on every consulted Codex; when present, `server.mjs` refuses (the Codex→Claude half of the guard). Not user-set |
 | `GASLAMP_LOGFILE` | `~/.codex/gaslamp.log` | transcript path; `off` to disable |
 | `GASLAMP_DEBUG` | unset | verbose stderr (raw JSON-RPC) |
 | `CLAUDE_BIN` | autodetected | path to the `claude` binary |

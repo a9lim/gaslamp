@@ -31,6 +31,18 @@ process.stdout.write(JSON.stringify({
 `;
 
 let dir, stubPath, srv, rpc;
+const extraServers = []; // ad-hoc servers spawned with custom env, killed in after()
+
+// Spawn a second server with extra env (for the recursion-guard cases) and
+// return a JSON-RPC client for it. Tracked so after() can reap it.
+function startServer(extraEnv) {
+  const child = spawn(process.execPath, [BIN, "serve"], {
+    env: { ...process.env, CLAUDE_BIN: stubPath, GASLAMP_LOGFILE: "off", ...extraEnv },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  extraServers.push(child);
+  return makeRpc(child);
+}
 
 // Minimal newline-delimited JSON-RPC client over the child's stdio.
 function makeRpc(child) {
@@ -77,6 +89,7 @@ before(() => {
 
 after(() => {
   if (srv) srv.kill();
+  for (const c of extraServers) c.kill();
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -137,6 +150,37 @@ test("unknown sandbox value falls back to the user's config (no flag)", async ()
   const c = r.result.structuredContent.content;
   assert.doesNotMatch(c, /--dangerously-skip-permissions/);
   assert.doesNotMatch(c, /--permission-mode/);
+});
+
+test("recursion guard: the spawned claude is denied the Claude→Codex bridge", async () => {
+  const r = await rpc.request("tools/call", { name: "gaslamp", arguments: { prompt: "p" } });
+  const c = r.result.structuredContent.content; // stub echoes its argv
+  assert.match(c, /--disallowedTools/);
+  assert.match(c, /mcp__gaslamp/);
+});
+
+test("recursion guard: a nested Codex (GASLAMP_NESTED) is refused without spawning claude", async () => {
+  const rpc2 = startServer({ GASLAMP_NESTED: "1" });
+  const r = await rpc2.request("tools/call", { name: "gaslamp", arguments: { prompt: "p" } });
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.structuredContent.content, /recursi/i);
+  assert.doesNotMatch(r.result.structuredContent.content, /stub ok/); // claude was never spawned
+  assert.equal(r.result.structuredContent.sessionId, null);
+});
+
+test("recursion guard: gaslamp-reply is refused when nested too", async () => {
+  const rpc2 = startServer({ GASLAMP_NESTED: "1" });
+  const r = await rpc2.request("tools/call", { name: "gaslamp-reply", arguments: { sessionId: "s", prompt: "p" } });
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.structuredContent.content, /recursi/i);
+});
+
+test("recursion guard: GASLAMP_ALLOW_RECURSION restores nesting and drops the deny flag", async () => {
+  const rpc2 = startServer({ GASLAMP_NESTED: "1", GASLAMP_ALLOW_RECURSION: "1" });
+  const r = await rpc2.request("tools/call", { name: "gaslamp", arguments: { prompt: "hello" } });
+  assert.equal(r.result.isError, false);
+  assert.match(r.result.structuredContent.content, /stub ok: hello/);
+  assert.doesNotMatch(r.result.structuredContent.content, /--disallowedTools/);
 });
 
 test("missing required arg is a JSON-RPC error", async () => {

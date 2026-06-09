@@ -1,6 +1,6 @@
 {
   "name": "gaslamp",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Minimal MCP server that lets Claude and Codex talk to each other.",
   "type": "module",
   "bin": {

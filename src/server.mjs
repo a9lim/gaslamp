@@ -10,8 +10,14 @@
 //   - Per-call `sandbox` arg; OMITTING it defers to the user's own Claude config
 //     (~/.claude settings: permission defaultMode, allow/deny rules, model, MCP,
 //     CLAUDE.md), the mirror of Codex deferring to `sandbox_mode` in config.toml.
-//   - No bespoke timeout and no recursion isolation — a consulted Claude loads
-//     the user's full config/MCP, exactly as a consulted Codex does.
+//   - No bespoke timeout — a consulted Claude loads the user's full config/MCP,
+//     exactly as a consulted Codex does.
+//   - Recursion guard (default on): a consult is one hop. The Claude we spawn is
+//     denied the Claude→Codex bridge (`--disallowedTools mcp__gaslamp`, a deny
+//     rule that holds even under --dangerously-skip-permissions), and if THIS
+//     server is itself running under a consulted Codex (GASLAMP_NESTED, set on
+//     the Claude→Codex registration by `gaslamp setup`) it refuses the call.
+//     GASLAMP_ALLOW_RECURSION=1 restores the old unbounded symmetric handoff.
 //   - The lone Claude-only step (no Codex analog, so not an asymmetry):
 //     ANTHROPIC_API_KEY is stripped from the child env so keychain OAuth is
 //     authoritative. A stale env key 401s every call otherwise.
@@ -57,6 +63,14 @@ const ALLOWED_TOOLS = (process.env.GASLAMP_ALLOWED_TOOLS || "Read Grep Glob WebF
   .split(/[\s,]+/).filter(Boolean).join(",");
 const DEBUG = !!process.env.GASLAMP_DEBUG;
 
+// Recursion guard: a consult is one hop unless explicitly opted out of.
+//   ALLOW_RECURSION — restore the old symmetric, unbounded handoff.
+//   NESTED          — this server is running under a Codex that is itself a
+//                     gaslamp consult (tagged GASLAMP_NESTED=1 on the
+//                     Claude→Codex registration); refuse to hand work back.
+const ALLOW_RECURSION = !!process.env.GASLAMP_ALLOW_RECURSION;
+const NESTED = !!process.env.GASLAMP_NESTED && !ALLOW_RECURSION;
+
 // Persistent consultation transcript (the lightweight "watch them talk" log).
 // Defaults to ~/.codex/gaslamp.log; set GASLAMP_LOGFILE=off to disable.
 const LOGFILE = process.env.GASLAMP_LOGFILE === "off" ? null
@@ -77,6 +91,20 @@ const CLAUDE_BIN = resolveClaude();
 function send(msg) { process.stdout.write(JSON.stringify(msg) + "\n"); }
 function reply(id, result) { send({ jsonrpc: "2.0", id, result }); }
 function fail(id, code, message) { send({ jsonrpc: "2.0", id, error: { code, message } }); }
+
+// Refuse a consult that would be a second hop: this server runs under a Codex
+// that is itself a gaslamp consult. Returned as a readable tool result (not a
+// protocol error) so the consulting Codex sees why, mirroring the claude-error
+// shape in runClaude.
+function refuseNested(id, name) {
+  const text =
+    "Recursive gaslamp consultation is disabled. This Codex is itself a gaslamp " +
+    "consult (GASLAMP_NESTED is set), so it can't hand work back to Claude — a " +
+    "consult is one hop. Set GASLAMP_ALLOW_RECURSION=1 to allow nested handoffs.";
+  log("refuse nested", name);
+  transcript(`← refused ${name} (nested; recursion disabled)`);
+  reply(id, { content: [{ type: "text", text }], structuredContent: { sessionId: null, content: text }, isError: true });
+}
 
 // Mirrors codex's `{ threadId, content }` outputSchema. sessionId may be null on
 // a hard failure, so only `content` is required.
@@ -99,10 +127,12 @@ const TOOLS = [
   {
     name: "gaslamp",
     title: "Claude",
+    // Mirrors codex mcp-server's `codex` description ("Run a Codex session.
+    // Accepts configuration parameters matching the Codex Config struct.") so the
+    // two directions read as twins. "config" (not "Config struct") because Claude
+    // Code has no such struct and gaslamp takes no `config` param — honest mirror.
     description:
-      "Start a Claude Code session for a code review, second opinion, or fix. Claude works in " +
-      "`cwd` and returns a summary of what it found or changed. Returns a sessionId; pass it to " +
-      "gaslamp-reply to continue the same thread with full context.",
+      "Run a Claude session. Accepts configuration parameters matching the Claude Code config.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -119,7 +149,9 @@ const TOOLS = [
   {
     name: "gaslamp-reply",
     title: "Claude Reply",
-    description: "Continue a Claude consultation by providing the sessionId and prompt, preserving its context.",
+    // Mirrors codex's `codex-reply`: "Continue a Codex conversation by providing
+    // the thread id and prompt." (thread id → session id).
+    description: "Continue a Claude conversation by providing the session id and prompt.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -150,6 +182,12 @@ function runClaude({ prompt, cwd, model, sandbox, resume }, id) {
   }
   // else (omitted): pass no permission flag — the consulted Claude uses the
   // user's own ~/.claude config, mirroring Codex deferring to config.toml.
+
+  // Recursion guard: deny the consulted Claude the Claude→Codex bridge so it
+  // can't open a further sub-session. A bare server name removes all of
+  // gaslamp's tools from its context, and deny rules hold even under
+  // --dangerously-skip-permissions. GASLAMP_ALLOW_RECURSION=1 opts back in.
+  if (!ALLOW_RECURSION) args.push("--disallowedTools", "mcp__gaslamp");
   if (resume) args.push("--resume", resume);
   if (model) args.push("--model", model);
 
@@ -204,6 +242,7 @@ function handle(msg) {
   } else if (method === "tools/call") {
     const name = params?.name;
     const a = params?.arguments || {};
+    if (NESTED && (name === "gaslamp" || name === "gaslamp-reply")) return refuseNested(id, name);
     if (name === "gaslamp") {
       if (!a.prompt) return fail(id, -32602, "missing required arg: prompt");
       runClaude({ prompt: a.prompt, cwd: a.cwd, model: a.model, sandbox: a.sandbox }, id);

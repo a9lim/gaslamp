@@ -63,11 +63,21 @@ A Codex→Claude consult with no `sandbox` arg runs with your own Claude config
 would. Per-call overrides: `read-only` (advisory, no edits) or `danger-full-access`
 (full read/write). Claude has no filesystem sandbox, so there's no `workspace-write`.
 
+## Recursion
+
+A consult is **one hop** by default: a Claude reached through gaslamp can't turn
+around and consult Codex, and a Codex reached through gaslamp can't consult Claude
+back. (The Claude→Codex registration tags the consulted Codex with
+`GASLAMP_NESTED=1`, and the spawned Claude is denied the bridge with
+`--disallowedTools mcp__gaslamp`.) Only the top-level agent you drive can open a
+consult. Set `GASLAMP_ALLOW_RECURSION=1` to restore unbounded, symmetric handoffs.
+
 ## Env knobs
 
 | var | default | meaning |
 |-----|---------|---------|
 | `GASLAMP_ALLOWED_TOOLS` | `Read Grep Glob WebFetch WebSearch` | tools the `read-only` override permits |
+| `GASLAMP_ALLOW_RECURSION` | unset | allow a consulted agent to consult back (off = one hop) |
 | `GASLAMP_LOGFILE` | `~/.codex/gaslamp.log` | transcript path; `off` to disable |
 | `GASLAMP_DEBUG` | unset | verbose stderr (raw JSON-RPC) |
 | `CLAUDE_BIN` | autodetected | path to the `claude` binary |
