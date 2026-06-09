@@ -106,10 +106,15 @@ export function runSetup(argv = []) {
   if (okCodex) patchCodexTimeouts(); // codex mcp add can't persist these; do it ourselves
 
   // --- Claude -> Codex: claude gets gaslamp's codex tools (user scope) --------
+  // `--env GASLAMP_NESTED=1` tags every Codex spawned as a Claude consult as
+  // nested, so gaslamp's server.mjs refuses if that consulted Codex tries to
+  // hand work back to Claude — a consult is one hop (GASLAMP_ALLOW_RECURSION=1
+  // opts back in). Placement is safe: the server name `gaslamp` precedes --env
+  // and `--` follows it, so the name is never misread as a KEY=VALUE pair.
   remove("claude", "gaslamp", ["-s", "user"]);
   remove("claude", "codex", ["-s", "user"]); // legacy name
   const okClaude = run("claude -> codex", "claude",
-    ["mcp", "add", "gaslamp", "-s", "user", "--", "codex", "mcp-server"]);
+    ["mcp", "add", "gaslamp", "-s", "user", "--env", "GASLAMP_NESTED=1", "--", "codex", "mcp-server"]);
 
   console.log();
   if (okCodex && okClaude) {

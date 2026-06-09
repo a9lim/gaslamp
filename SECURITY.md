@@ -7,8 +7,12 @@ unattended**: by default the subagents use your `~/.claude` and `~/.codex`
 configs. If either allows writes, the dispatched subagents will be able to as 
 well, without approval. Risks:
 
-1. **Prompt injection.** Because either direction can call back, a loop can
-   form. 
+1. **Prompt injection / runaway loops.** Either direction *can* call back, so an
+   injected prompt could try to drive an unbounded consult loop. By default this is
+   bounded: a consult is **one hop** — a gaslamp-spawned agent is blocked from
+   consulting back (the recursion guard; see AGENTS.md / README). Setting
+   `GASLAMP_ALLOW_RECURSION=1` removes the bound and restores unbounded mutual
+   handoff, so enable it only if you trust the loop to terminate.
 2. **Credential handling.** `ANTHROPIC_API_KEY` is stripped from the child env so
    the consulted Claude authenticates via keychain OAuth, never an env key. No 
    credentials are logged.
