@@ -1,128 +1,131 @@
-// setup.mjs — register both consultation channels under the name `gaslamp`.
+// setup.mjs — point both agents at the gaslamp CLI and clean up 1.0.
 //
-// Two directions:
-//   Codex → Claude : Codex gets a `gaslamp` tool that hands off to this server.
-//   Claude → Codex : Claude gets Codex's native `codex mcp-server` (its `codex`
-//                    / `codex-reply` tools), registered as `gaslamp`.
+// gaslamp 2.0 has no MCP servers, so there is nothing to register. Setup
+// instead:
 //
-// Idempotent: removes prior registrations (including the legacy `claude` /
-// `codex` names) before re-adding.
+//   1. removes the 1.0 MCP registrations from both CLIs (incl. legacy names;
+//      `codex mcp remove` drops the tool_timeout_sec patch along with the
+//      block — the whole timeout saga dies with the registration)
+//   2. writes a managed guidance block — between <!-- gaslamp:begin/end -->
+//      markers, idempotently — into ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md.
+//      A CLI doesn't self-advertise in context the way MCP tools did; the
+//      consult contract lives in the agents' own instructions, which is where
+//      the when-to-consult guidance always belonged anyway.
+//   3. allowlists the command in ~/.claude/settings.json so consults don't
+//      stall on a permission prompt. (Codex needs no analog: shell commands
+//      are governed by approval_policy.)
 //
-//   gaslamp setup            register the published package (Codex spawns
-//                            `npx -y gaslamp serve`). Survives node upgrades —
-//                            no absolute, version-pinned paths.
-//   gaslamp setup --local    register THIS checkout (Codex spawns
-//                            `<node> <abs>/bin/gaslamp.mjs serve`). Use before
-//                            the package is published, or for from-source dev.
+//   gaslamp setup            published install (`gaslamp` on PATH)
+//   gaslamp setup --local    THIS checkout (absolute bin path; from-source dev)
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { which } from "./which.mjs";
 
-function run(label, cmd, args) {
-  process.stdout.write(`  ${label}: ${cmd} ${args.join(" ")}\n`);
-  const r = spawnSync(cmd, args, { stdio: "inherit" });
-  return r.status === 0;
+export const BEGIN = "<!-- gaslamp:begin -->";
+export const END = "<!-- gaslamp:end -->";
+
+// Replace the marked block in place if present, else append. Pure; idempotent
+// by construction (upsert(upsert(t)) === upsert(t)).
+export function upsertBlock(text, block) {
+  const b = text.indexOf(BEGIN), e = text.indexOf(END);
+  if (b >= 0 && e > b) return text.slice(0, b) + block + text.slice(e + END.length);
+  const sep = !text ? "" : text.endsWith("\n\n") ? "" : text.endsWith("\n") ? "\n" : "\n\n";
+  return text + sep + block + "\n";
 }
 
-// `codex mcp add` cannot persist per-server timeouts (its `-c` flag is a runtime
-// override that never lands in the block), so we patch ~/.codex/config.toml
-// directly. Without this, Codex's MCP client kills any tools/call that runs past
-// its default tool_timeout_sec — a substantial consult (30-45 min) dies with
-// `timed out awaiting tools/call after 120s` while the gaslamp child keeps
-// working, orphaned. The server itself has no timeout; this is the client side.
-// Idempotent: sets the keys in-place if present, inserts them if not.
-function patchCodexTimeouts() {
-  const tool = process.env.GASLAMP_TOOL_TIMEOUT_SEC || "100000"; // ~27.8h — matches Claude Code's own default MCP tool timeout (1e8 ms), so both directions are symmetric
-  const startup = process.env.GASLAMP_STARTUP_TIMEOUT_SEC || "30"; // headroom for npx cold-start
-  const cfgPath = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
+// The block written into the CONSULTING agent's instructions; `target` is the
+// agent on the other end. Direction-appropriate backgrounding guidance.
+export function guidanceBlock(target, cmd) {
+  const Target = target === "codex" ? "Codex" : "Claude";
+  const bg = target === "codex"
+    ? "Run it as a background shell task (run_in_background) and keep working — the task notification delivers the reply."
+    : "Run it in your background terminal and keep working — check back for the reply between steps.";
+  return `${BEGIN}
+## gaslamp — consult ${Target}
 
-  let text;
-  try { text = readFileSync(cfgPath, "utf8"); }
-  catch { console.warn(`  (could not read ${cfgPath}; skipped timeout patch)`); return; }
+Hand work to ${Target} for a second pair of eyes: **verify** a fix before
+claiming it works, **spar** on a design, **review** a diff, **diagnose** with
+fresh context. Send raw evidence (errors, diffs, commands) — not just your
+framing. Reach for it actively, not only when stuck.
 
-  const lines = text.split("\n");
-  const header = lines.findIndex((l) => l.trim() === "[mcp_servers.gaslamp]");
-  if (header < 0) { console.warn("  (no [mcp_servers.gaslamp] block found; skipped timeout patch)"); return; }
+    ${cmd} ${target} [--resume <session|job>] [--model <m>] [--sandbox <mode>] "<prompt>"
+    ${cmd} ${target} - < prompt.md     # long prompts via stdin
 
-  // Block runs from the header to the next table header (line starting with `[`).
-  let end = lines.length;
-  for (let i = header + 1; i < lines.length; i++) { if (/^\s*\[/.test(lines[i])) { end = i; break; } }
-  const block = lines.slice(header, end);
-
-  const setKey = (key, val) => {
-    const i = block.findIndex((l) => new RegExp(`^\\s*${key}\\s*=`).test(l));
-    if (i >= 0) { block[i] = `${key} = ${val}`; return; }
-    let at = block.length;                       // insert before trailing blank lines
-    while (at > 1 && block[at - 1].trim() === "") at--;
-    block.splice(at, 0, `${key} = ${val}`);
-  };
-  setKey("tool_timeout_sec", tool);
-  setKey("startup_timeout_sec", startup);
-
-  writeFileSync(cfgPath, [...lines.slice(0, header), ...block, ...lines.slice(end)].join("\n"));
-  process.stdout.write(`  timeouts: tool_timeout_sec=${tool}s startup_timeout_sec=${startup}s in ${cfgPath}\n`);
+Blocks until the reply, then prints it plus a \`[gaslamp] job: … · session: …\`
+trailer. ${bg}
+Several consults can run in parallel. Continue a thread with --resume (session
+id, or the job id from the trailer). \`${cmd} jobs\` lists consult records,
+\`${cmd} poll <job|--last>\` fetches one (exit 10 = still running); records
+live under ~/.gaslamp/jobs/. A consult is one hop: the consulted agent cannot
+consult back, so own the synthesis yourself.
+${END}`;
 }
 
-// Quietly remove an existing registration (ignore "not found" noise).
-function remove(cli, name, scopeArgs = []) {
-  spawnSync(cli, ["mcp", "remove", name, ...scopeArgs], { stdio: "ignore" });
+// Add an entry to permissions.allow in a settings.json text. Returns the new
+// text, or null if the existing text isn't valid JSON (never clobber).
+export function addAllow(text, entry) {
+  let obj = {};
+  if (text && text.trim()) {
+    try { obj = JSON.parse(text); } catch { return null; }
+  }
+  obj.permissions ??= {};
+  obj.permissions.allow ??= [];
+  if (!obj.permissions.allow.includes(entry)) obj.permissions.allow.push(entry);
+  return JSON.stringify(obj, null, 2) + "\n";
 }
 
 export function runSetup(argv = []) {
   const local = argv.includes("--local") || argv.includes("-l");
-
-  const codex = which("codex");
   const claude = which("claude");
-  if (!codex) { console.error("setup: `codex` not found on PATH. Install Codex first."); process.exitCode = 1; return; }
-  if (!claude) { console.error("setup: `claude` not found on PATH. Install Claude Code first."); process.exitCode = 1; return; }
-  if (!local && !which("npx")) {
-    console.error("setup: `npx` not found on PATH — the published registration spawns `npx -y gaslamp serve`.");
-    console.error("       Install Node's npm/npx, or use `gaslamp setup --local` to register this checkout instead.");
-    process.exitCode = 1; return;
+  const codex = which("codex");
+  if (!claude) console.warn("setup: `claude` not on PATH — `gaslamp claude` consults will fail until it is (or set CLAUDE_BIN).");
+  if (!codex) console.warn("setup: `codex` not on PATH — `gaslamp codex` consults will fail until it is (or set CODEX_BIN).");
+
+  const cmd = local
+    ? resolve(join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "gaslamp.mjs"))
+    : "gaslamp";
+  console.log(`mode: ${local ? `local checkout (${cmd})` : "published (`gaslamp` on PATH)"}\n`);
+
+  // --- 1) tear down 1.0 MCP registrations (and legacy names) -----------------
+  for (const [cli, names, scope] of [
+    ["claude", ["gaslamp", "codex"], ["-s", "user"]],
+    ["codex", ["gaslamp", "claude"], []],
+  ]) {
+    if (!which(cli)) continue;
+    for (const name of names) {
+      const r = spawnSync(cli, ["mcp", "remove", name, ...scope], { encoding: "utf8" });
+      if (r.status === 0) console.log(`  removed 1.0 MCP registration: ${name} (from ${cli})`);
+    }
   }
 
-  console.log(`codex: ${codex}`);
-  console.log(`claude: ${claude}`);
-  console.log(`mode:  ${local ? "local checkout" : "published (npx)"}\n`);
+  // --- 2) managed guidance blocks ---------------------------------------------
+  const targets = [
+    [join(homedir(), ".claude", "CLAUDE.md"), "codex"],
+    [join(process.env.CODEX_HOME || join(homedir(), ".codex"), "AGENTS.md"), "claude"],
+  ];
+  for (const [file, target] of targets) {
+    mkdirSync(dirname(file), { recursive: true });
+    const prev = existsSync(file) ? readFileSync(file, "utf8") : "";
+    writeFileSync(file, upsertBlock(prev, guidanceBlock(target, cmd)));
+    console.log(`  guidance block: ${file}`);
+  }
 
-  // --- Codex -> Claude: codex gets a `gaslamp` tool that hands off to Claude ---
-  remove("codex", "gaslamp");
-  remove("codex", "claude"); // legacy name
-  let serveCmd;
-  if (local) {
-    const node = which("node") || process.execPath;
-    const shim = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "gaslamp.mjs"));
-    serveCmd = ["mcp", "add", "gaslamp", "--", node, shim, "serve"];
+  // --- 3) Claude-side allowlist --------------------------------------------------
+  const settingsPath = join(homedir(), ".claude", "settings.json");
+  const entry = `Bash(${cmd}:*)`;
+  const next = addAllow(existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : "", entry);
+  if (next == null) {
+    console.warn(`  ! ${settingsPath} is not valid JSON — add ${entry} to permissions.allow yourself`);
   } else {
-    // Bare `npx` (not an absolute path) so whatever node is active resolves the
-    // latest published gaslamp at spawn time — survives nvm/node upgrades.
-    serveCmd = ["mcp", "add", "gaslamp", "--", "npx", "-y", "gaslamp", "serve"];
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    writeFileSync(settingsPath, next);
+    console.log(`  allowlist: ${entry} → ${settingsPath}`);
   }
-  const okCodex = run("codex -> claude", "codex", serveCmd);
-  if (okCodex) patchCodexTimeouts(); // codex mcp add can't persist these; do it ourselves
 
-  // --- Claude -> Codex: claude gets gaslamp's codex tools (user scope) --------
-  // `--env GASLAMP_NESTED=1` tags every Codex spawned as a Claude consult as
-  // nested, so gaslamp's server.mjs refuses if that consulted Codex tries to
-  // hand work back to Claude — a consult is one hop (GASLAMP_ALLOW_RECURSION=1
-  // opts back in). Placement is safe: the server name `gaslamp` precedes --env
-  // and `--` follows it, so the name is never misread as a KEY=VALUE pair.
-  remove("claude", "gaslamp", ["-s", "user"]);
-  remove("claude", "codex", ["-s", "user"]); // legacy name
-  const okClaude = run("claude -> codex", "claude",
-    ["mcp", "add", "gaslamp", "-s", "user", "--env", "GASLAMP_NESTED=1", "--", "codex", "mcp-server"]);
-
-  console.log();
-  if (okCodex && okClaude) {
-    console.log("registered both directions as `gaslamp`.");
-    console.log("→ restart Claude Code so it loads the server.");
-    console.log("  verify:  codex mcp list   and   claude mcp list");
-  } else {
-    console.error("setup: one or both registrations failed (see above).");
-    process.exitCode = 1;
-  }
+  console.log("\ndone. restart Claude Code once so it drops the 1.0 MCP tools; the CLI itself needs no restart.");
+  console.log("verify: gaslamp doctor");
 }

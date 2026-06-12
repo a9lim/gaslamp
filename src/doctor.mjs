@@ -1,12 +1,14 @@
-// doctor.mjs — non-invasive health check for a gaslamp install. Verifies the
-// pieces are present and both directions are registered, without spending an
-// actual Claude or Codex round-trip. Exits nonzero if anything critical is off.
+// doctor.mjs — non-invasive health check for a gaslamp 2.0 install. Verifies
+// binaries, guidance blocks, and local state without spending a Claude or
+// Codex round-trip. Exits nonzero if anything actionable is off.
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { which } from "./which.mjs";
+import { BEGIN } from "./setup.mjs";
+import { alive, jobsDir, listJobIds, liveStatus, locksDir, readMeta } from "./jobs.mjs";
 
 function resolveClaude() {
   if (process.env.CLAUDE_BIN && existsSync(process.env.CLAUDE_BIN)) return process.env.CLAUDE_BIN;
@@ -14,12 +16,6 @@ function resolveClaude() {
   if (onPath) return onPath;
   const local = join(homedir(), ".local/bin/claude");
   return existsSync(local) ? local : null;
-}
-
-// Read `<cli> mcp list` and report whether a server named `gaslamp` is present.
-function registered(cli) {
-  const r = spawnSync(cli, ["mcp", "list"], { encoding: "utf8" });
-  return /(^|\s)gaslamp(\s|:|$)/m.test((r.stdout || "") + (r.stderr || ""));
 }
 
 export function runDoctor() {
@@ -33,18 +29,48 @@ export function runDoctor() {
   // Binaries
   const claude = resolveClaude();
   add(!!claude, "claude binary", claude || "not found (set CLAUDE_BIN or add to PATH)");
-  const codex = which("codex");
-  add(!!codex, "codex binary", codex || "not found on PATH");
+  const codex = (process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN) && process.env.CODEX_BIN) || which("codex");
+  add(!!codex, "codex binary", codex || "not found on PATH (or set CODEX_BIN)");
 
-  // Registrations (only checkable if the relevant CLI exists)
-  if (codex) {
-    const reg = registered("codex");
-    add(reg, "codex -> claude", reg ? "gaslamp registered in Codex" : "not registered — run `gaslamp setup`");
+  // Guidance blocks (what setup installs — a CLI doesn't self-advertise)
+  for (const [who, file] of [
+    ["claude", join(homedir(), ".claude", "CLAUDE.md")],
+    ["codex", join(process.env.CODEX_HOME || join(homedir(), ".codex"), "AGENTS.md")],
+  ]) {
+    let present = false;
+    try { present = readFileSync(file, "utf8").includes(BEGIN); } catch {}
+    add(present, `${who} guidance block`, present ? file : `missing in ${file} — run \`gaslamp setup\``);
   }
-  if (claude) {
-    const reg = registered("claude");
-    add(reg, "claude -> codex", reg ? "gaslamp registered in Claude" : "not registered — run `gaslamp setup`");
+
+  // Lingering 1.0 MCP registrations (2.0's `serve` is a tombstone, so a stale
+  // registration would spawn a process that errors on every load)
+  for (const cli of ["claude", "codex"]) {
+    if (!which(cli)) continue;
+    const r = spawnSync(cli, ["mcp", "list"], { encoding: "utf8" });
+    const reg = /(^|\s)gaslamp(\s|:|$)/m.test((r.stdout || "") + (r.stderr || ""));
+    add(!reg, `${cli}: no stale MCP registration`, reg ? "1.0 registration still present — run `gaslamp setup` to remove it" : "clean");
   }
+
+  // Ambient sentinel: a top-level shell with GASLAMP_NESTED set refuses every
+  // consult (and breaks the test suite — the spar found this the hard way).
+  add(!process.env.GASLAMP_NESTED, "no ambient GASLAMP_NESTED",
+    process.env.GASLAMP_NESTED ? "set in this shell — consults here will refuse as nested" : "clean");
+
+  // Local state (informational; never fails)
+  let stale = 0, total = 0;
+  try {
+    for (const f of readdirSync(locksDir())) {
+      total++;
+      let holder = null;
+      try { holder = JSON.parse(readFileSync(join(locksDir(), f), "utf8")); } catch {}
+      if (!holder?.pid || !alive(holder.pid)) stale++;
+    }
+  } catch {}
+  add(true, "locks", total ? `${total} held, ${stale} stale (stale locks are reaped on the next consult)` : "none");
+
+  const ids = listJobIds();
+  const running = ids.filter((id) => { const m = readMeta(id); return m && liveStatus(m) === "running"; }).length;
+  add(true, "jobs", ids.length ? `${ids.length} recorded under ${jobsDir()}${running ? ` (${running} running)` : ""}` : `none yet (${jobsDir()})`);
 
   let allGood = true;
   for (const c of checks) {
@@ -53,7 +79,7 @@ export function runDoctor() {
   }
   console.log();
   if (allGood) {
-    console.log("all good. (doctor doesn't round-trip; for a live check, consult from one agent to the other.)");
+    console.log("all good. (doctor doesn't round-trip; for a live check, run a real consult from either agent.)");
   } else {
     console.error("some checks failed — see above.");
     process.exitCode = 1;

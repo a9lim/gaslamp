@@ -1,15 +1,14 @@
 #!/usr/bin/env node
-// gaslamp: Minimal MCP server that lets Claude and Codex talk to each other.
+// gaslamp: let Claude Code and Codex consult each other from the shell.
 //
-//   gaslamp            run the MCP server on stdio (what Codex spawns)
-//   gaslamp serve      same as above, explicit
-//   gaslamp setup      register both directions (add --local for this checkout)
-//   gaslamp doctor     verify the install without a round-trip
-//   gaslamp --version  print the version
-//   gaslamp --help     print this help
+//   gaslamp claude … / codex …   one blocking consult (the heart of it)
+//   gaslamp jobs / poll          read the durable consult records
+//   gaslamp setup [--local]      clean up 1.0, install guidance blocks
+//   gaslamp doctor               non-invasive health check
 //
-// The bare/`serve` path speaks newline-delimited JSON-RPC on stdout and must
-// stay quiet otherwise; `setup`/`doctor` are interactive and print freely.
+// 2.0 replaced the 1.0 MCP servers with this direct CLI: each agent
+// backgrounds the call with its own facility, so consults run in parallel and
+// replies trickle in as they finish. `serve` remains only as a tombstone.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -18,34 +17,65 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
 
-const HELP = `gaslamp ${pkg.version}: Minimal MCP server that lets Claude and Codex talk to each other.
+const HELP = `gaslamp ${pkg.version}: let Claude Code and Codex consult each other from the shell.
 
 Usage:
-  gaslamp [serve]        Run the MCP server on stdio (what Codex spawns).
-  gaslamp setup          Register both directions as \`gaslamp\` (published / npx).
-  gaslamp setup --local  Register THIS checkout instead of the published package.
-  gaslamp doctor         Check binaries + registrations (no round-trip).
-  gaslamp --version      Print the version.
-  gaslamp --help         Print this help.
+  gaslamp claude [opts] <prompt|->   Consult Claude (blocks until the reply).
+  gaslamp codex  [opts] <prompt|->   Consult Codex  (blocks until the reply).
+  gaslamp jobs [-n N]                List consult records, newest first.
+  gaslamp poll <job|--last>          Print one record's reply/status.
+  gaslamp setup [--local]            Remove 1.0 MCP registrations; install the
+                                     guidance blocks + Claude allowlist entry.
+                                     --local pins this checkout's bin path.
+  gaslamp doctor                     Health check (binaries, blocks, state).
 
-A Codex->Claude consult with no \`sandbox\` arg uses the user's own ~/.claude
-config (permission mode, allow/deny, model, MCP). \`read-only\` and
-\`danger-full-access\` are per-call overrides.
+Consult options:
+  --resume <session|job>   Continue a session (a prior job id works too).
+  --model <m>              Backend model override.
+  --sandbox <mode>         claude: read-only | danger-full-access
+                           codex:  read-only | workspace-write | danger-full-access
+                           Omit to defer to the consulted agent's own config.
+  --cwd <dir>              Working directory for the consult (default: here).
+  --json                   Machine envelope on stdout:
+                           {backend, jobId, sessionId, status, exitCode, content}
+  -                        Read the prompt from stdin (default when piped).
 
-Env knobs (read by the server):
-  GASLAMP_ALLOWED_TOOLS  tools the \`read-only\` override permits (space/comma list)
-  GASLAMP_LOGFILE        transcript path (default ~/.codex/gaslamp.log; "off" disables)
-  GASLAMP_DEBUG          verbose stderr (raw JSON-RPC)
-  CLAUDE_BIN             path to the claude binary (autodetected otherwise)
+Run a consult as a background shell task and keep working — several can run in
+parallel, replies land as the tasks finish. Every consult writes through to
+~/.gaslamp/jobs/<id>/ (prompt, raw events, reply, stderr), and the session id
+is recorded the moment the backend reports it: a killed consult costs the
+in-flight turn, not the session. Recovery is --resume, not orphans.
+
+Exit codes:
+  0 ok · 1 consult failed/killed · 2 usage · 3 nested (one-hop) refusal ·
+  4 network-disabled sandbox · 5 session busy · poll: 10 still running
+
+Env knobs:
+  GASLAMP_HOME             state dir (default ~/.gaslamp)
+  GASLAMP_ALLOWED_TOOLS    tools the claude read-only override permits
+                           (default: Read Grep Glob WebFetch WebSearch)
+  GASLAMP_ALLOW_RECURSION  let consulted agents consult back (off = one hop)
+  GASLAMP_DEBUG            verbose stderr (spawn argv)
+  CLAUDE_BIN / CODEX_BIN   backend binaries (autodetected otherwise)
 `;
 
 const [cmd, ...rest] = process.argv.slice(2);
 
 switch (cmd) {
-  case undefined:
-  case "serve": {
-    const { startServer } = await import(new URL("../src/server.mjs", import.meta.url));
-    startServer();
+  case "claude":
+  case "codex": {
+    const { runConsult } = await import(new URL("../src/consult.mjs", import.meta.url));
+    runConsult(cmd, rest);
+    break;
+  }
+  case "jobs": {
+    const { runJobs } = await import(new URL("../src/jobs.mjs", import.meta.url));
+    runJobs(rest);
+    break;
+  }
+  case "poll": {
+    const { runPoll } = await import(new URL("../src/jobs.mjs", import.meta.url));
+    runPoll(rest);
     break;
   }
   case "setup": {
@@ -58,10 +88,20 @@ switch (cmd) {
     runDoctor(rest);
     break;
   }
+  case "serve":
+    // Tombstone for stale 1.0 registrations (which spawn `… gaslamp serve`).
+    process.stderr.write(
+      `gaslamp serve is gone: 2.0 replaced the MCP servers with a direct CLI.\n` +
+      `This process was probably spawned by a stale 1.0 registration.\n` +
+      `Run \`gaslamp setup\` (or \`npx -y gaslamp setup\`) to remove it and install\n` +
+      `the 2.0 guidance blocks, then restart the agent. See the README for why.\n`);
+    process.exitCode = 2;
+    break;
   case "-v":
   case "--version":
     process.stdout.write(pkg.version + "\n");
     break;
+  case undefined:
   case "-h":
   case "--help":
     process.stdout.write(HELP);
