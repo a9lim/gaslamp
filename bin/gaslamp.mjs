@@ -22,11 +22,17 @@ const HELP = `gaslamp ${pkg.version}: let Claude Code and Codex consult each oth
 Usage:
   gaslamp claude [opts] <prompt|->   Consult Claude (blocks until the reply).
   gaslamp codex  [opts] <prompt|->   Consult Codex  (blocks until the reply).
+  gaslamp fleet <backend> [opts]     Fan out a fleet of consults (one command).
+    -n N <prompt>                    Replicate one prompt across N fresh sessions.
+    - < tasks.jsonl                  Or one task per line on stdin (see below).
   gaslamp jobs [-n N]                List consult records, newest first.
-  gaslamp poll <job|--last>          Print one record's reply/status.
-  gaslamp setup [--local]            Remove 1.0 MCP registrations; install the
-                                     guidance blocks + Claude allowlist entry.
+  gaslamp poll <job|fleet|--last>    Print one record's reply/status.
+  gaslamp setup [--local]            Remove 1.0 MCP registrations; allowlist the
+                                     command; print the guidance to add yourself.
                                      --local pins this checkout's bin path.
+  gaslamp guidance [claude|codex]    Print the consult-guidance block for an
+                                     agent's instructions (pipe with >>). No arg
+                                     prints both. --local embeds this bin path.
   gaslamp doctor                     Health check (binaries, blocks, state).
 
 Consult options:
@@ -40,8 +46,19 @@ Consult options:
                            {backend, jobId, sessionId, status, exitCode, content}
   -                        Read the prompt from stdin (default when piped).
 
-Run a consult as a background shell task and keep working — several can run in
-parallel, replies land as the tasks finish. Every consult writes through to
+Fleet options (in addition to --model / --sandbox / --cwd / --json, applied to
+every consult unless a per-task field on a stdin manifest overrides it):
+  -n, --count N            Replicate the prompt across N fresh sessions.
+  -j, --concurrency N      Max consults in flight (default 4 — quota-shaped).
+  - < tasks.jsonl          One task per line: a {"prompt",…} JSON object (also
+                           model/sandbox/cwd/resume/label), or a bare prompt.
+A fleet defaults its consults to --sandbox read-only (N writers in one cwd
+race); pass --sandbox to opt into writes. It blocks until every consult is in,
+then prints them all (--json: a results array, manifest order). A killed fleet
+leaves each child resumable; gaslamp poll <fleet-id> regroups them later.
+
+Run a consult (or a fleet) as a background shell task and keep working — several
+can run in parallel, replies land as the tasks finish. Every consult writes through to
 ~/.gaslamp/jobs/<id>/ (prompt, raw events, reply, stderr), and the session id
 is recorded the moment the backend reports it: a killed consult costs the
 in-flight turn, not the session. Recovery is --resume, not orphans.
@@ -68,6 +85,11 @@ switch (cmd) {
     runConsult(cmd, rest);
     break;
   }
+  case "fleet": {
+    const { runFleet } = await import(new URL("../src/fleet.mjs", import.meta.url));
+    runFleet(rest[0], rest.slice(1));
+    break;
+  }
   case "jobs": {
     const { runJobs } = await import(new URL("../src/jobs.mjs", import.meta.url));
     runJobs(rest);
@@ -81,6 +103,11 @@ switch (cmd) {
   case "setup": {
     const { runSetup } = await import(new URL("../src/setup.mjs", import.meta.url));
     runSetup(rest);
+    break;
+  }
+  case "guidance": {
+    const { runGuidance } = await import(new URL("../src/setup.mjs", import.meta.url));
+    runGuidance(rest);
     break;
   }
   case "doctor": {

@@ -43,14 +43,24 @@ and [Codex](https://developers.openai.com/codex). Node ≥ 18.
 
 ```sh
 npm install -g gaslamp
-gaslamp setup           # remove 1.x MCP registrations, install guidance blocks
+gaslamp setup           # remove 1.x MCP registrations, allowlist the command
 gaslamp doctor          # verify binaries + setup
 ```
 
-Setup writes a managed block (between `<!-- gaslamp:begin/end -->` markers)
-into `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` so each agent knows the
-tool exists and how to call it, and allowlists the command in
-`~/.claude/settings.json`. Re-running it refreshes the blocks in place.
+Setup removes any 1.x MCP registrations and allowlists the command in
+`~/.claude/settings.json` (so consults don't stall on a permission prompt). It
+does **not** edit your agent instructions — a CLI can't self-advertise the way
+MCP tools did, so each agent needs a short consult-guidance block in its
+instructions to know the tool exists, but appending to your personal
+`CLAUDE.md` / `AGENTS.md` is yours to do, not a surprise setup springs:
+
+```sh
+gaslamp guidance                                  # review both blocks
+gaslamp guidance claude >> ~/.claude/CLAUDE.md    # so Claude consults Codex
+gaslamp guidance codex  >> ~/.codex/AGENTS.md     # so Codex consults Claude
+```
+
+`setup` prints these same commands when it finishes.
 
 ### From source
 
@@ -65,9 +75,11 @@ cd gaslamp
 ```
 gaslamp claude [opts] <prompt|->   Consult Claude (blocks until the reply).
 gaslamp codex  [opts] <prompt|->   Consult Codex  (blocks until the reply).
+gaslamp fleet <backend> [opts]     Fan out a fleet of consults in one command.
 gaslamp jobs [-n N]                List consult records, newest first.
-gaslamp poll <job|--last>          Print one record's reply/status (exit 10 = running).
-gaslamp setup [--local]            Clean up 1.x; install guidance blocks + allowlist.
+gaslamp poll <job|fleet|--last>    Print one record's reply/status (exit 10 = running).
+gaslamp setup [--local]            Clean up 1.x; allowlist; print guidance to add.
+gaslamp guidance [claude|codex]    Print the consult-guidance block (pipe with >>).
 gaslamp doctor                     Health check.
 
 Consult options:
@@ -77,7 +89,34 @@ Consult options:
                            codex:  read-only | workspace-write | danger-full-access
   --cwd <dir>              Working directory for the consult.
   --json                   {backend, jobId, sessionId, status, exitCode, content}
+
+Fleet options (plus the consult options above, applied to every consult):
+  -n, --count N            Replicate the prompt across N fresh sessions.
+  -j, --concurrency N      Max consults in flight (default 4).
+  - < tasks.jsonl          One task per line: {"prompt",…} or a bare prompt.
 ```
+
+## Fleets
+
+`gaslamp fleet` fires a whole batch of consults from one command and blocks
+until every reply is in — `-n N "<prompt>"` runs one prompt across N fresh
+sessions (voting, diverse sampling), or a JSONL manifest on stdin runs one
+`{prompt, model?, sandbox?, cwd?, resume?, label?}` task per line:
+
+```sh
+gaslamp fleet codex -n 5 "spot the worst bug in this diff: …"   # 5 takes, vote
+gaslamp fleet claude - < tasks.jsonl                            # one task/line
+gaslamp fleet codex -n 8 --json "…" | jq '.results[].content'   # structured
+```
+
+Each task is a normal consult — its own job record and resumable session — so a
+killed fleet costs in-flight turns, not sessions. Two safety defaults at N:
+fleets run `--sandbox read-only` unless you opt into writes (N agents writing one
+directory race), and a manifest that resumes the same session twice is refused
+(they'd deadlock on the session lock). `gaslamp poll <fleet-id>` regroups a
+fleet's replies later. It's the same move as backgrounding one consult, one
+layer up — and it's the only one-command fan-out Codex has, since (unlike Claude
+Code) it has no built-in agent-workflow tool.
 
 ## Job records
 

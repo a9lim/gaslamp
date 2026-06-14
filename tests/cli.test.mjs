@@ -67,7 +67,7 @@ after(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 // marker) must not leak into the suite — the design spar hit exactly this.
 function env(extra = {}) {
   const e = { ...process.env };
-  for (const k of ["GASLAMP_NESTED", "GASLAMP_ALLOW_RECURSION", "CODEX_SANDBOX_NETWORK_DISABLED",
+  for (const k of ["GASLAMP_NESTED", "GASLAMP_ALLOW_RECURSION", "GASLAMP_FLEET", "CODEX_SANDBOX_NETWORK_DISABLED",
     "GASLAMP_DEBUG", "GASLAMP_ALLOWED_TOOLS", "ANTHROPIC_API_KEY", "STUB_DELAY_MS"]) delete e[k];
   return { ...e, CLAUDE_BIN: claudeStub, CODEX_BIN: codexStub, GASLAMP_HOME: home, ...extra };
 }
@@ -77,6 +77,7 @@ const run = (args, opts = {}) =>
 
 const jobIdFrom = (out) => out.match(/job: (c[lx]-\d{8}-\d{6}-[0-9a-f]{4})/)?.[1];
 const meta = (id) => JSON.parse(readFileSync(join(home, "jobs", id, "meta.json"), "utf8"));
+const fleetIdFrom = (s) => s.match(/fleet (fl-\d{8}-\d{6}-[0-9a-f]{4})/)?.[1];
 
 async function until(fn, ms = 5000) {
   const t0 = Date.now();
@@ -321,5 +322,95 @@ test("--version prints the package version; --help shows consults + exit codes",
   const h = run(["--help"]);
   assert.equal(h.status, 0);
   assert.match(h.stdout, /gaslamp claude/);
+  assert.match(h.stdout, /gaslamp fleet/);
+  assert.match(h.stdout, /gaslamp guidance/);
   assert.match(h.stdout, /session busy/);
+});
+
+// ---- fleet -----------------------------------------------------------------------------
+
+test("fleet -n replicates a prompt across N consults, blocks, collects all", () => {
+  const r = run(["fleet", "codex", "-n", "3", "review this"]);
+  assert.equal(r.status, 0, r.stderr);
+  // three distinct replies in manifest order, plus a done summary
+  assert.equal((r.stdout.match(/stub codex: review this/g) || []).length, 3);
+  assert.match(r.stdout, /\[task-1\] done/);
+  assert.match(r.stdout, /\[task-3\] done/);
+  assert.match(r.stdout, /3\/3 done/);
+  // a fleet record grouping three real child job ids, all done
+  const fleetId = fleetIdFrom(r.stderr);
+  assert.match(fleetId, /^fl-/);
+  const fm = JSON.parse(readFileSync(join(home, "jobs", fleetId, "meta.json"), "utf8"));
+  assert.equal(fm.children.length, 3);
+  assert.equal(fm.counts.done, 3);
+  for (const c of fm.children) { assert.match(c.jobId, /^cx-/); assert.equal(meta(c.jobId).status, "done"); }
+});
+
+test("fleet --json emits a results array in manifest order", () => {
+  const r = run(["fleet", "codex", "-n", "2", "--json", "q"]);
+  assert.equal(r.status, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.backend, "codex");
+  assert.equal(j.results.length, 2);
+  assert.equal(j.counts.done, 2);
+  assert.deepEqual(j.results.map((x) => x.index), [0, 1]);
+  for (const x of j.results) { assert.equal(x.status, "done"); assert.match(x.content, /stub codex: q/); assert.match(x.jobId, /^cx-/); }
+});
+
+test("fleet reads a JSONL manifest on stdin; per-task fields override", () => {
+  const r = run(["fleet", "codex", "-"], { input: '{"prompt":"task one","model":"gpt-x","label":"alpha"}\nbare task two\n' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /\[alpha\] done/);          // explicit label honored
+  assert.match(r.stdout, /stub codex: task one/);
+  assert.match(r.stdout, /"-m","gpt-x"/);            // per-task model reached that child
+  assert.match(r.stdout, /\[task-2\] done/);         // default label for the bare line
+  assert.match(r.stdout, /stub codex: bare task two/);
+});
+
+test("fleet defaults consults to read-only; --sandbox opts into writes", () => {
+  const def = run(["fleet", "codex", "-n", "1", "p"]);
+  assert.match(def.stdout, /sandbox_mode=\\?"read-only\\?"/);
+  assert.match(def.stderr, /read-only by default/);
+  const danger = run(["fleet", "codex", "-n", "1", "--sandbox", "danger-full-access", "p"]);
+  assert.match(danger.stdout, /sandbox_mode=\\?"danger-full-access\\?"/);
+  // claude fleet gets the read-only mapping too
+  const cl = run(["fleet", "claude", "-n", "1", "p"]);
+  assert.match(cl.stdout, /"--permission-mode","default"/);
+});
+
+test("fleet forbids duplicate resume targets (would deadlock on the lock)", () => {
+  const r = run(["fleet", "codex", "-"], { input: '{"prompt":"a","resume":"sess-1"}\n{"prompt":"b","resume":"sess-1"}\n' });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /same session/);
+});
+
+test("fleet forbids duplicate labels", () => {
+  const r = run(["fleet", "codex", "-"], { input: '{"prompt":"a","label":"dup"}\n{"prompt":"b","label":"dup"}\n' });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /duplicate task label/);
+});
+
+test("fleet honors the one-hop guard and a bad backend", () => {
+  assert.equal(run(["fleet", "codex", "-n", "1", "p"], { env: { GASLAMP_NESTED: "1" } }).status, 3);
+  assert.equal(run(["fleet", "bogus", "p"]).status, 2);
+});
+
+test("the early started receipt is gated on GASLAMP_FLEET (single consult stays clean)", () => {
+  // without the flag, --json stdout is exactly the envelope (existing contract)
+  assert.doesNotMatch(run(["codex", "--json", "p"]).stdout, /"type":"started"/);
+  // with it, the child emits the receipt before the envelope, on its own line
+  const r = run(["codex", "--json", "p"], { env: { GASLAMP_FLEET: "1" } });
+  const lines = r.stdout.trim().split("\n");
+  assert.match(lines[0], /"type":"started"/);
+  assert.ok(JSON.parse(lines[0]).jobId.startsWith("cx-"));
+  assert.equal(JSON.parse(lines.at(-1)).status, "done");
+});
+
+test("poll <fleet-id> regroups children, deriving status from their records", () => {
+  const r = run(["fleet", "claude", "-n", "2", "grouped"]);
+  const fleetId = fleetIdFrom(r.stderr);
+  const p = run(["poll", fleetId]);
+  assert.equal(p.status, 0, p.stderr);
+  assert.equal((p.stdout.match(/stub claude: grouped/g) || []).length, 2);
+  assert.match(p.stdout, new RegExp(`${fleetId} · claude · 2/2 done`));
 });

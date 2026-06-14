@@ -84,6 +84,47 @@ This is also why claude runs `--output-format stream-json` rather than plain
 leave nothing — no session id, no events. Stream mode makes the write-through
 record real.
 
+### Fleets: one command, a bounded fan-out
+
+`gaslamp fleet <backend>` fires a *fleet* of consults from one command —
+`-n N "<prompt>"` replicates a prompt across N fresh sessions (voting, diverse
+sampling), or a JSONL manifest on stdin runs one
+`{prompt,model?,sandbox?,cwd?,resume?,label?}` task per line (each line maps 1:1
+to a Claude Workflow `agent()` call). It blocks until every reply is in, then
+prints them all (`--json`: a results array in manifest order); `src/fleet.mjs`.
+
+The implementation is deliberately a thin bounded-concurrency runner that
+**shells out to `gaslamp <backend> --json` once per task** and never touches
+`consult.mjs`. Each child is exactly the single-consult path — its own job
+record, kill-group, resumable session — so a killed fleet costs in-flight turns,
+not sessions. This keeps faith with the 2.0 principle: the harness still
+backgrounds the whole fleet as one blocking call; the fleet just does the
+bounded fan-out you'd otherwise hand-roll across N background tasks. It earns
+its place chiefly on **Codex's** behalf — Claude Code has the Workflow tool,
+Codex has nothing, so `gaslamp fleet claude` is the only one-command way for
+Codex to fan out a fleet of claudes.
+
+Two divergences from a single consult, both for safety at N (from the design
+spar with Codex):
+
+- **Fleets default to `--sandbox read-only`.** N write-capable agents in one cwd
+  is a race factory; one consult deferring to config is fine, N is not. Pass
+  `--sandbox` (fleet-wide) or a per-task `sandbox` (manifest) to opt into
+  writes. The default concurrency is **4** (quota-shaped — the bottleneck is API
+  rate limits, not cores — not Workflow's `min(16, cores-2)`); `--concurrency`
+  raises it.
+- **Duplicate resume targets are refused** before launch: two tasks resuming the
+  same session would deadlock on the session lock. Duplicate labels too.
+
+`poll <fleet-id>` recomputes each child's state from its own record via
+`liveStatus()` — the `fleet-…` meta is grouping metadata, never the authority
+(a SIGKILLed parent leaves it stale). The fleet learns each child's job id the
+moment it spawns, from a tiny machine "started" receipt the child emits on
+stdout **only when `GASLAMP_FLEET=1`** (set on fleet children) — so the parent
+record names in-flight children even if killed mid-run, with no human-stderr
+scraping, and the single-consult `--json` contract (exactly one envelope line)
+stays pristine.
+
 ## Things that are not obvious
 
 - **`shell_environment_policy.inherit = "core"` strips the sentinel.** A
@@ -152,33 +193,43 @@ is `bin/gaslamp.mjs`; the consult engine is `src/consult.mjs`.
 ```sh
 ./setup.sh                 # from-source: gaslamp setup --local (pins this checkout)
 gaslamp setup              # on an installed copy
-gaslamp doctor             # binaries, guidance blocks, stale 1.0 regs, state
+gaslamp doctor             # binaries, guidance (advisory), stale 1.0 regs, state
 
 npm run check              # node -c syntax check on every source file
 npm test                   # node --test against stub claude AND codex binaries
 ```
 
 Setup is idempotent: it removes 1.0 MCP registrations (incl. legacy names),
-upserts the guidance block between `<!-- gaslamp:begin/end -->` markers in
-`~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`, and allowlists the command in
-`~/.claude/settings.json`. A CLI doesn't self-advertise in context the way MCP
-tools did — the guidance blocks *are* the discoverability story.
+allowlists the command in `~/.claude/settings.json`, and **prints** the consult
+guidance for you to add to your agent instructions. It does NOT edit
+`~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md` — a CLI can't self-advertise the
+way MCP tools did, so the guidance block is still what makes gaslamp
+discoverable, but silently appending to a personal instructions file is the kind
+of surprise a published tool shouldn't spring. `gaslamp guidance [claude|codex]`
+reprints the block (with the `<!-- gaslamp:begin/end -->` markers for provenance
+and find-replace); the arg is the agent whose file you're filling — `claude` →
+`~/.claude/CLAUDE.md` (the "consult Codex" block), `codex` → `~/.codex/AGENTS.md`
+(the "consult Claude" block) — no arg prints both. `doctor` reports a missing
+block as a soft advisory, not a failure.
 
 To exercise by hand: `node bin/gaslamp.mjs claude --model haiku "ping"` is a
-cheap live round-trip; `tail -f ~/.gaslamp/jobs/<id>/events.jsonl` watches one
-in flight; `gaslamp jobs` / `gaslamp poll --last` read the records.
+cheap live round-trip; `node bin/gaslamp.mjs fleet codex -n 2 "name a color"` is
+a cheap fleet; `tail -f ~/.gaslamp/jobs/<id>/events.jsonl` watches one in
+flight; `gaslamp jobs` / `gaslamp poll --last` / `gaslamp poll <fleet-id>` read
+the records.
 
 ## Files
 
-- `bin/gaslamp.mjs` — CLI entry; dispatches consult verbs / jobs / poll /
-  setup / doctor; `serve` is a migration tombstone for stale 1.0 registrations
+- `bin/gaslamp.mjs` — CLI entry; dispatches consult verbs / fleet / jobs / poll
+  / setup / guidance / doctor; `serve` is a tombstone for stale 1.0 registrations
 - `src/consult.mjs` — the heart: preflights, locks, spawn, stream, signals
-- `src/jobs.mjs` — durable job records + `jobs` / `poll` readers
-- `src/setup.mjs` — 1.0 teardown + guidance blocks + allowlist (`--local`
-  pins this checkout's absolute bin path)
+- `src/fleet.mjs` — bounded-concurrency fan-out over `gaslamp <backend> --json`
+- `src/jobs.mjs` — durable job + fleet records, `jobs` / `poll` readers
+- `src/setup.mjs` — 1.0 teardown + allowlist + prints guidance; `runGuidance`
+  (the `guidance` verb). `--local` pins this checkout's absolute bin path
 - `src/doctor.mjs` — non-invasive health check
 - `src/which.mjs` — PATH lookup without spawning a shell
-- `tests/cli.test.mjs` — consults end-to-end against stub backends
+- `tests/cli.test.mjs` — consults + fleets end-to-end against stub backends
 - `tests/setup.test.mjs` — pure helpers + e2e setup/doctor in a temp HOME
 - `setup.sh` — thin from-source wrapper around `gaslamp setup --local`
 - `package.json` — npm metadata; version is the single source of truth
@@ -191,9 +242,11 @@ in flight; `gaslamp jobs` / `gaslamp poll --last` read the records.
 | `GASLAMP_ALLOWED_TOOLS` | `Read Grep Glob WebFetch WebSearch` | tools the claude `read-only` override permits |
 | `GASLAMP_ALLOW_RECURSION` | unset | let consulted agents consult back (off = one hop) |
 | `GASLAMP_NESTED` | set by gaslamp on children | the one-hop sentinel; consult verbs refuse under it. Not user-set |
+| `GASLAMP_FLEET` | set by gaslamp on fleet children | makes a child emit the early "started" receipt. Not user-set |
 | `GASLAMP_DEBUG` | unset | verbose stderr (spawn argv) |
 | `CLAUDE_BIN` / `CODEX_BIN` | autodetected | backend binaries |
 
-Exit codes: `0` reply delivered · `1` consult failed/killed · `2` usage ·
-`3` nested (one-hop) refusal · `4` network-disabled sandbox · `5` session
-busy · `poll`: `10` still running.
+Exit codes: `0` reply delivered (fleet: all consults done) · `1` consult
+failed/killed (fleet: any consult failed/killed) · `2` usage · `3` nested
+(one-hop) refusal · `4` network-disabled sandbox · `5` session busy · `poll`:
+`10` still running.

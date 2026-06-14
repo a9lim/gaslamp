@@ -29,17 +29,42 @@ export const alive = (pid) => {
   catch (e) { return e.code === "EPERM"; }
 };
 
-// Job ids embed the backend and a local timestamp, so they sort chronologically
-// (within a backend) and read at a glance: cl-20260612-141233-9af2
-export function newJobId(backend) {
+// Ids embed a local timestamp, so they sort chronologically and read at a
+// glance: cl-20260612-141233-9af2 (claude), cx-… (codex), fl-… (fleet).
+function stampAndRand() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
   const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
   const rand = Math.random().toString(16).slice(2, 6).padEnd(4, "0");
-  return `${backend === "claude" ? "cl" : "cx"}-${stamp}-${rand}`;
+  return `${stamp}-${rand}`;
 }
 
+export const newJobId = (backend) => `${backend === "claude" ? "cl" : "cx"}-${stampAndRand()}`;
+export const newFleetId = () => `fl-${stampAndRand()}`;
+
 export const looksLikeJobId = (s) => /^(cl|cx)-\d{8}-\d{6}-[0-9a-f]{4}$/.test(String(s));
+export const looksLikeFleetId = (s) => /^fl-\d{8}-\d{6}-[0-9a-f]{4}$/.test(String(s));
+
+// A fleet record lives alongside the consult records under jobs/, but it is
+// grouping metadata only — never the authority on a child's state (a killed
+// parent leaves it stale). `poll <fleet-id>` recomputes from the child records.
+export const fleetDir = (id) => join(jobsDir(), id);
+export function writeFleetMeta(meta) {
+  writeFileSync(join(fleetDir(meta.id), "meta.json"), JSON.stringify(meta, null, 2) + "\n");
+}
+export function readFleetMeta(id) {
+  try { return JSON.parse(readFileSync(join(fleetDir(id), "meta.json"), "utf8")); }
+  catch { return null; }
+}
+export function createFleet(meta, tasks) {
+  mkdirSync(fleetDir(meta.id), { recursive: true });
+  writeFileSync(join(fleetDir(meta.id), "manifest.jsonl"),
+    tasks.map((t) => JSON.stringify({
+      index: t.index, label: t.label, promptChars: t.prompt.length,
+      model: t.model ?? null, sandbox: t.sandbox ?? null, cwd: t.cwd ?? null, resume: t.resume ?? null,
+    })).join("\n") + "\n");
+  writeFleetMeta(meta);
+}
 
 export function readMeta(id) {
   try { return JSON.parse(readFileSync(join(jobDir(id), "meta.json"), "utf8")); }
@@ -133,12 +158,13 @@ export function runJobs(argv = []) {
   }
 }
 
-// gaslamp poll <job|--last> — print one record's reply/status.
+// gaslamp poll <job|fleet|--last> — print one record's reply/status.
 // Exit: 0 done · 1 failed/killed/stale · 2 usage · 10 still running.
 export function runPoll(argv = []) {
   let id = argv.find((a) => !a.startsWith("-"));
   if (!id || argv.includes("--last")) id = listJobIds()[0];
   if (!id) { console.error(`gaslamp poll: no jobs under ${jobsDir()}`); process.exitCode = 2; return; }
+  if (looksLikeFleetId(id)) return pollFleet(id);
   const m = readMeta(id);
   if (!m) { console.error(`gaslamp poll: no job record ${id}`); process.exitCode = 2; return; }
   const status = liveStatus(m);
@@ -147,4 +173,34 @@ export function runPoll(argv = []) {
   if (reply) process.stdout.write(reply.endsWith("\n") ? reply : reply + "\n");
   console.log(renderTrailer(m, status));
   process.exitCode = status === "done" ? 0 : 1;
+}
+
+// gaslamp poll <fleet-id> — recompute every child's state from its own record
+// (the fleet meta is grouping, not authority) and print each reply.
+// Exit: 0 all done · 1 some failed/killed · 2 usage · 10 some still running.
+function pollFleet(id) {
+  const fm = readFleetMeta(id);
+  if (!fm) { console.error(`gaslamp poll: no fleet record ${id} under ${jobsDir()}`); process.exitCode = 2; return; }
+  const children = (fm.children || []).filter((c) => c && c.jobId);
+  let running = 0, done = 0, other = 0;
+  const out = [];
+  for (const c of children) {
+    const m = readMeta(c.jobId);
+    const status = m ? liveStatus(m) : "missing";
+    if (status === "running") running++;
+    else if (status === "done") done++;
+    else other++;
+    const sid = m?.sessionId ? ` · ${m.sessionId.slice(0, 8)}` : "";
+    out.push(`\n━━ [${c.label ?? c.index}] ${status} · ${c.jobId}${sid} ━━`);
+    const reply = status === "done" ? readReply(c.jobId) : null;
+    if (reply?.trim()) out.push(reply.trimEnd());
+    else if (status !== "running") {
+      out.push(`(no reply — ${status})`);
+      if (m?.sessionId) out.push(`resume: gaslamp ${m.backend} --resume ${m.sessionId}`);
+    }
+  }
+  if (out.length) process.stdout.write(out.join("\n") + "\n");
+  console.log(`[gaslamp fleet] ${id} · ${fm.backend} · ${done}/${children.length} done` +
+    (running ? ` · ${running} running` : "") + (other ? ` · ${other} failed/killed` : ""));
+  process.exitCode = running ? 10 : (children.length && done === children.length) ? 0 : 1;
 }

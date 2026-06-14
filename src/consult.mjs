@@ -221,6 +221,14 @@ export function runConsult(backend, argv) {
 
   writeSync(2, `[gaslamp] → ${backend} · job ${id} · watch: tail -f ${join(dir, "events.jsonl")}\n`);
 
+  // Early machine receipt for the fleet runner (gated on GASLAMP_FLEET, which the
+  // fleet sets on its children): the parent records each child's job id the
+  // moment it spawns — durable even if the fleet is killed mid-run — without
+  // scraping the human stderr breadcrumb. The lone --json line is the envelope
+  // (it carries `backend`/`status`); this receipt carries `type:"started"`.
+  if (o.json && process.env.GASLAMP_FLEET === "1")
+    process.stdout.write(JSON.stringify({ type: "started", jobId: id, childPid: meta.childPid }) + "\n");
+
   child.stdin.on("error", () => {}); // EPIPE if the child dies before reading
   child.stdin.write(prompt);
   child.stdin.end();

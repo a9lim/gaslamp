@@ -20,7 +20,8 @@ function resolveClaude() {
 
 export function runDoctor() {
   const checks = [];
-  const add = (pass, label, detail) => checks.push({ pass, label, detail });
+  // soft checks report status but never fail the run (advisory, not broken).
+  const add = (pass, label, detail, soft = false) => checks.push({ pass, label, detail, soft });
 
   // Node
   const major = Number(process.versions.node.split(".")[0]);
@@ -32,14 +33,17 @@ export function runDoctor() {
   const codex = (process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN) && process.env.CODEX_BIN) || which("codex");
   add(!!codex, "codex binary", codex || "not found on PATH (or set CODEX_BIN)");
 
-  // Guidance blocks (what setup installs — a CLI doesn't self-advertise)
+  // Guidance blocks (advisory — yours to add now; a CLI doesn't self-advertise,
+  // so an agent won't discover gaslamp until its instructions mention it).
   for (const [who, file] of [
     ["claude", join(homedir(), ".claude", "CLAUDE.md")],
     ["codex", join(process.env.CODEX_HOME || join(homedir(), ".codex"), "AGENTS.md")],
   ]) {
     let present = false;
     try { present = readFileSync(file, "utf8").includes(BEGIN); } catch {}
-    add(present, `${who} guidance block`, present ? file : `missing in ${file} — run \`gaslamp setup\``);
+    add(present, `${who} guidance block`,
+      present ? file : `not in ${file} — add it so the agent discovers gaslamp: \`gaslamp guidance ${who} >> ${file}\``,
+      true);
   }
 
   // Lingering 1.0 MCP registrations (2.0's `serve` is a tombstone, so a stale
@@ -74,8 +78,8 @@ export function runDoctor() {
 
   let allGood = true;
   for (const c of checks) {
-    process.stdout.write(`  ${c.pass ? "✓" : "✗"} ${c.label}: ${c.detail}\n`);
-    if (!c.pass) allGood = false;
+    process.stdout.write(`  ${c.pass ? "✓" : c.soft ? "•" : "✗"} ${c.label}: ${c.detail}\n`);
+    if (!c.pass && !c.soft) allGood = false;
   }
   console.log();
   if (allGood) {
