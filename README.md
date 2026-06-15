@@ -6,8 +6,7 @@
 [![node](https://img.shields.io/node/v/gaslamp)](https://www.npmjs.com/package/gaslamp)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
 
-Let Claude Code and Codex consult each other from the shell — parallel,
-background-friendly, resumable.
+Let Claude Code and Codex consult each other from the shell.
 
 ```sh
 gaslamp codex  "review this diff for races: …"     # Claude asks Codex
