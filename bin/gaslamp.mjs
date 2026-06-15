@@ -2,13 +2,13 @@
 // gaslamp: let Claude Code and Codex consult each other from the shell.
 //
 //   gaslamp claude … / codex …   one blocking consult (the heart of it)
+//   gaslamp fleet <backend> …    fan out a bounded fleet of consults
 //   gaslamp jobs / poll          read the durable consult records
-//   gaslamp setup [--local]      clean up 1.0, install guidance blocks
-//   gaslamp doctor               non-invasive health check
+//   gaslamp setup [--local]      allowlist the command for Claude Code
 //
-// 2.0 replaced the 1.0 MCP servers with this direct CLI: each agent
-// backgrounds the call with its own facility, so consults run in parallel and
-// replies trickle in as they finish. `serve` remains only as a tombstone.
+// Each agent backgrounds the call with its own facility, so consults run in
+// parallel and replies trickle in as they finish. No MCP servers, no daemon:
+// asynchrony is the harness's job.
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -27,13 +27,9 @@ Usage:
     - < tasks.jsonl                  Or one task per line on stdin (see below).
   gaslamp jobs [-n N]                List consult records, newest first.
   gaslamp poll <job|fleet|--last>    Print one record's reply/status.
-  gaslamp setup [--local]            Remove 1.0 MCP registrations; allowlist the
-                                     command; print the guidance to add yourself.
+  gaslamp setup [--local]            Allowlist the command in Claude Code so
+                                     consults don't stall on a permission prompt.
                                      --local pins this checkout's bin path.
-  gaslamp guidance [claude|codex]    Print the consult-guidance block for an
-                                     agent's instructions (pipe with >>). No arg
-                                     prints both. --local embeds this bin path.
-  gaslamp doctor                     Health check (binaries, blocks, state).
 
 Consult options:
   --resume <session|job>   Continue a session (a prior job id works too).
@@ -105,25 +101,6 @@ switch (cmd) {
     runSetup(rest);
     break;
   }
-  case "guidance": {
-    const { runGuidance } = await import(new URL("../src/setup.mjs", import.meta.url));
-    runGuidance(rest);
-    break;
-  }
-  case "doctor": {
-    const { runDoctor } = await import(new URL("../src/doctor.mjs", import.meta.url));
-    runDoctor(rest);
-    break;
-  }
-  case "serve":
-    // Tombstone for stale 1.0 registrations (which spawn `… gaslamp serve`).
-    process.stderr.write(
-      `gaslamp serve is gone: 2.0 replaced the MCP servers with a direct CLI.\n` +
-      `This process was probably spawned by a stale 1.0 registration.\n` +
-      `Run \`gaslamp setup\` (or \`npx -y gaslamp setup\`) to remove it and install\n` +
-      `the 2.0 guidance blocks, then restart the agent. See the README for why.\n`);
-    process.exitCode = 2;
-    break;
   case "-v":
   case "--version":
     process.stdout.write(pkg.version + "\n");

@@ -139,16 +139,13 @@ stays pristine.
 - **The guard is loop prevention, not a security boundary.** A shell-capable
   consulted agent could unset the env var. That's fine — its job is to stop
   accidental recursion, and `GASLAMP_ALLOW_RECURSION=1` is a documented
-  opt-out anyway. The spawned claude also gets `--disallowedTools
-  mcp__gaslamp` as belt-and-braces against *stale 1.0 MCP registrations*
-  (deny rules hold even under `--dangerously-skip-permissions`).
+  opt-out anyway.
 - **The sentinel is an env footgun for tests.** Inside a consulted agent,
   `GASLAMP_NESTED=1` is ambient — and anything that spawns gaslamp inherits
   it, including this repo's own test suite, which then fails with nested
   refusals (found by a consulted Codex *running the suite during the design
   spar*). The tests scrub `GASLAMP_*` / `CODEX_SANDBOX_*` /
-  `ANTHROPIC_API_KEY` from every spawn env; `doctor` flags an ambient
-  sentinel.
+  `ANTHROPIC_API_KEY` from every spawn env.
 - **Codex sets `CODEX_SANDBOX_NETWORK_DISABLED=1` in sandboxed shells** (and
   `CODEX_SANDBOX=seatbelt`) when network is off — under default
   `workspace-write`, DNS fails outright. 1.0's MCP server ran *outside* the
@@ -193,24 +190,19 @@ is `bin/gaslamp.mjs`; the consult engine is `src/consult.mjs`.
 ```sh
 ./setup.sh                 # from-source: gaslamp setup --local (pins this checkout)
 gaslamp setup              # on an installed copy
-gaslamp doctor             # binaries, guidance (advisory), stale 1.0 regs, state
 
 npm run check              # node -c syntax check on every source file
 npm test                   # node --test against stub claude AND codex binaries
 ```
 
-Setup is idempotent: it removes 1.0 MCP registrations (incl. legacy names),
-allowlists the command in `~/.claude/settings.json`, and **prints** the consult
-guidance for you to add to your agent instructions. It does NOT edit
-`~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md` — a CLI can't self-advertise the
-way MCP tools did, so the guidance block is still what makes gaslamp
-discoverable, but silently appending to a personal instructions file is the kind
-of surprise a published tool shouldn't spring. `gaslamp guidance [claude|codex]`
-reprints the block (with the `<!-- gaslamp:begin/end -->` markers for provenance
-and find-replace); the arg is the agent whose file you're filling — `claude` →
-`~/.claude/CLAUDE.md` (the "consult Codex" block), `codex` → `~/.codex/AGENTS.md`
-(the "consult Claude" block) — no arg prints both. `doctor` reports a missing
-block as a soft advisory, not a failure.
+Setup is idempotent and does exactly one thing: allowlist the command
+(`Bash(gaslamp:*)`) in `~/.claude/settings.json` so a consult doesn't stall on a
+permission prompt. It does NOT touch `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md`
+— a CLI can't self-advertise the way MCP tools did, so each agent needs a one-line
+consult note in its instructions to discover gaslamp, but appending to a personal
+instructions file is the kind of surprise a published tool shouldn't spring. The
+note is yours to add (the README has the text to paste); `--local` pins this
+checkout's absolute bin path in the allowlist for from-source dev.
 
 To exercise by hand: `node bin/gaslamp.mjs claude --model haiku "ping"` is a
 cheap live round-trip; `node bin/gaslamp.mjs fleet codex -n 2 "name a color"` is
@@ -221,16 +213,15 @@ the records.
 ## Files
 
 - `bin/gaslamp.mjs` — CLI entry; dispatches consult verbs / fleet / jobs / poll
-  / setup / guidance / doctor; `serve` is a tombstone for stale 1.0 registrations
+  / setup
 - `src/consult.mjs` — the heart: preflights, locks, spawn, stream, signals
 - `src/fleet.mjs` — bounded-concurrency fan-out over `gaslamp <backend> --json`
 - `src/jobs.mjs` — durable job + fleet records, `jobs` / `poll` readers
-- `src/setup.mjs` — 1.0 teardown + allowlist + prints guidance; `runGuidance`
-  (the `guidance` verb). `--local` pins this checkout's absolute bin path
-- `src/doctor.mjs` — non-invasive health check
+- `src/setup.mjs` — allowlist the command (`addAllow` helper); `--local` pins
+  this checkout's absolute bin path
 - `src/which.mjs` — PATH lookup without spawning a shell
 - `tests/cli.test.mjs` — consults + fleets end-to-end against stub backends
-- `tests/setup.test.mjs` — pure helpers + e2e setup/doctor in a temp HOME
+- `tests/setup.test.mjs` — `addAllow` helper + e2e setup allowlist in a temp HOME
 - `setup.sh` — thin from-source wrapper around `gaslamp setup --local`
 - `package.json` — npm metadata; version is the single source of truth
 

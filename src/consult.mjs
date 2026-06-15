@@ -135,9 +135,6 @@ function claudeArgs(o, resumeSid) {
   // else: no permission flag — the consulted Claude uses the user's own
   // ~/.claude config, mirroring Codex deferring to config.toml.
 
-  // Belt-and-braces against a lingering 1.0 MCP registration: deny rules hold
-  // even under --dangerously-skip-permissions. Harmless when none exists.
-  if (!ALLOW_RECURSION) args.push("--disallowedTools", "mcp__gaslamp");
   if (resumeSid) args.push("--resume", resumeSid);
   if (o.model) args.push("--model", o.model);
   return args; // prompt goes on stdin

@@ -1,5 +1,5 @@
-// Setup tests: the pure helpers (block upsert, allowlist merge) plus an
-// end-to-end `gaslamp setup` run against a temp HOME and stub CLIs on PATH.
+// Setup tests: the pure allowlist-merge helper, plus an end-to-end `gaslamp
+// setup` run against a temp HOME and stub CLIs on PATH.
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -8,12 +8,12 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BEGIN, addAllow, guidanceBlock } from "../src/setup.mjs";
+import { addAllow } from "../src/setup.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BIN = join(ROOT, "bin", "gaslamp.mjs");
 
-// ---- pure helpers -----------------------------------------------------------
+// ---- pure helper -----------------------------------------------------------
 
 test("addAllow creates, preserves, dedupes, refuses bad JSON", () => {
   const fresh = JSON.parse(addAllow("", "Bash(gaslamp:*)"));
@@ -29,17 +29,6 @@ test("addAllow creates, preserves, dedupes, refuses bad JSON", () => {
   assert.equal(deduped.permissions.allow.filter((e) => e === "Bash(gaslamp:*)").length, 1);
 
   assert.equal(addAllow("{not json", "Bash(gaslamp:*)"), null);
-});
-
-test("guidanceBlock is direction-appropriate", () => {
-  const forClaude = guidanceBlock("codex", "gaslamp");
-  assert.match(forClaude, /consult Codex/);
-  assert.match(forClaude, /gaslamp codex /);
-  assert.match(forClaude, /run_in_background/);
-  const forCodex = guidanceBlock("claude", "/abs/bin/gaslamp.mjs");
-  assert.match(forCodex, /consult Claude/);
-  assert.match(forCodex, /\/abs\/bin\/gaslamp\.mjs claude /);
-  assert.match(forCodex, /background terminal/);
 });
 
 // ---- end to end ---------------------------------------------------------------
@@ -78,7 +67,7 @@ function runSetup(args = []) {
   });
 }
 
-test("setup writes the allowlist but NOT the instruction files; prints how to add guidance", () => {
+test("setup writes the allowlist idempotently but NOT the instruction files", () => {
   const r = runSetup();
   assert.equal(r.status, 0, r.stderr);
 
@@ -90,78 +79,14 @@ test("setup writes the allowlist but NOT the instruction files; prints how to ad
   const settings = JSON.parse(readFileSync(join(fakeHome, ".claude", "settings.json"), "utf8"));
   assert.ok(settings.permissions.allow.includes("Bash(gaslamp:*)"));
 
-  // and it tells the user how to integrate the guidance themselves
-  assert.match(r.stdout, /guidance claude.* >> .*CLAUDE\.md/);
-  assert.match(r.stdout, /guidance codex.* >> .*AGENTS\.md/);
-
   assert.equal(runSetup().status, 0);
   const again = JSON.parse(readFileSync(join(fakeHome, ".claude", "settings.json"), "utf8"));
   assert.equal(again.permissions.allow.filter((e) => e.includes("gaslamp")).length, 1);
 });
 
-test("setup --local pins this checkout's bin path in the allowlist and the pointers", () => {
+test("setup --local pins this checkout's bin path in the allowlist", () => {
   const r = runSetup(["--local"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, new RegExp(`${BIN.replace(/[.]/g, "\\.")} guidance claude --local`));
   const settings = JSON.parse(readFileSync(join(fakeHome, ".claude", "settings.json"), "utf8"));
   assert.ok(settings.permissions.allow.includes(`Bash(${BIN}:*)`));
-});
-
-// ---- guidance verb -----------------------------------------------------------
-
-test("guidance prints both blocks with destinations; an agent arg prints one clean", () => {
-  const both = spawnSync(process.execPath, [BIN, "guidance"], { encoding: "utf8" });
-  assert.equal(both.status, 0, both.stderr);
-  assert.match(both.stdout, /add to ~\/\.claude\/CLAUDE\.md/);
-  assert.match(both.stdout, /add to ~\/\.codex\/AGENTS\.md/);
-  assert.match(both.stdout, /consult Codex/);
-  assert.match(both.stdout, /consult Claude/);
-
-  // single-agent mode: just the block (no destination header), clean for `>>`
-  const one = spawnSync(process.execPath, [BIN, "guidance", "claude"], { encoding: "utf8" });
-  assert.equal(one.status, 0, one.stderr);
-  assert.ok(one.stdout.startsWith(BEGIN));
-  assert.match(one.stdout, /consult Codex/);   // claude's file gets the consult-Codex block
-  assert.doesNotMatch(one.stdout, /add to ~/);
-
-  // --local embeds the absolute bin path
-  const local = spawnSync(process.execPath, [BIN, "guidance", "codex", "--local"], { encoding: "utf8" });
-  assert.match(local.stdout, new RegExp(`${BIN.replace(/[.]/g, "\\.")} claude `));
-
-  assert.equal(spawnSync(process.execPath, [BIN, "guidance", "bogus"], { encoding: "utf8" }).status, 2);
-});
-
-test("doctor: guidance is advisory (soft), present → ✓, absent → still passes", () => {
-  const e = { ...process.env };
-  delete e.GASLAMP_NESTED;
-  const base = {
-    ...e,
-    PATH: `${stubPath}:${process.env.PATH}`,
-    GASLAMP_HOME: join(fakeHome, ".gaslamp"),
-    CLAUDE_BIN: join(stubPath, "claude"),
-    CODEX_BIN: join(stubPath, "codex"),
-  };
-
-  // a home where the user HAS added the guidance: doctor sees it (✓), all good
-  mkdirSync(join(fakeHome, ".claude"), { recursive: true });
-  writeFileSync(join(fakeHome, ".claude", "CLAUDE.md"), `${BEGIN}\nx\n`);
-  mkdirSync(join(fakeHome, ".codex"), { recursive: true });
-  writeFileSync(join(fakeHome, ".codex", "AGENTS.md"), `${BEGIN}\nx\n`);
-  const good = spawnSync(process.execPath, [BIN, "doctor"], {
-    encoding: "utf8", env: { ...base, HOME: fakeHome, CODEX_HOME: join(fakeHome, ".codex") },
-  });
-  assert.equal(good.status, 0, good.stdout + good.stderr);
-  assert.match(good.stdout, /all good/);
-  assert.match(good.stdout, /✓ claude guidance block/);
-
-  // a bare home (no guidance added yet): a soft advisory, NOT a failure
-  const bareHome = join(dir, "bare-home");
-  mkdirSync(bareHome, { recursive: true });
-  const bad = spawnSync(process.execPath, [BIN, "doctor"], {
-    encoding: "utf8", env: { ...base, HOME: bareHome, CODEX_HOME: join(bareHome, ".codex") },
-  });
-  assert.equal(bad.status, 0, bad.stdout + bad.stderr);
-  assert.match(bad.stdout, /all good/);
-  assert.match(bad.stdout, /• claude guidance block/);
-  assert.match(bad.stdout, /gaslamp guidance claude >>/);
 });

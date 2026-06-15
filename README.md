@@ -43,24 +43,35 @@ and [Codex](https://developers.openai.com/codex). Node ≥ 18.
 
 ```sh
 npm install -g gaslamp
-gaslamp setup           # remove 1.x MCP registrations, allowlist the command
-gaslamp doctor          # verify binaries + setup
+gaslamp setup           # allowlist the command in ~/.claude/settings.json
 ```
 
-Setup removes any 1.x MCP registrations and allowlists the command in
-`~/.claude/settings.json` (so consults don't stall on a permission prompt). It
-does **not** edit your agent instructions — a CLI can't self-advertise the way
-MCP tools did, so each agent needs a short consult-guidance block in its
-instructions to know the tool exists, but appending to your personal
-`CLAUDE.md` / `AGENTS.md` is yours to do, not a surprise setup springs:
+`setup` allowlists the command so a consult doesn't stall on a permission
+prompt. It does **not** touch your agent instructions: a CLI can't
+self-advertise the way MCP tools did, so each agent needs a one-line note in its
+instructions to know gaslamp exists — but that's yours to add, not a surprise
+setup springs. Paste a short consult note into each agent's file.
 
-```sh
-gaslamp guidance                                  # review both blocks
-gaslamp guidance claude >> ~/.claude/CLAUDE.md    # so Claude consults Codex
-gaslamp guidance codex  >> ~/.codex/AGENTS.md     # so Codex consults Claude
-```
+**`~/.claude/CLAUDE.md`** — so Claude consults Codex:
 
-`setup` prints these same commands when it finishes.
+> Hand work to Codex for a second pair of eyes — verify a fix, spar on a design,
+> review a diff, diagnose with fresh context. Send raw evidence (errors, diffs,
+> commands), not just your framing.
+>
+> ```
+> gaslamp codex [--resume <session|job>] [--model <m>] [--sandbox <mode>] "<prompt>"
+> gaslamp codex - < prompt.md       # long prompts via stdin
+> gaslamp fleet codex -n N "…"      # fan out N takes in one command
+> ```
+>
+> Run it as a background shell task (`run_in_background`) and keep working — the
+> reply lands when it's done; several can run in parallel. A consult is one hop
+> (the consulted agent can't consult back), so own the synthesis. `gaslamp jobs`
+> lists records, `gaslamp poll <job|--last>` fetches one (exit 10 = running).
+
+**`~/.codex/AGENTS.md`** — so Codex consults Claude: the same block with
+`claude`/`Claude` in place of `codex`/`Codex`, and "run it in your background
+terminal, check back between steps" in place of the `run_in_background` line.
 
 ### From source
 
@@ -78,9 +89,7 @@ gaslamp codex  [opts] <prompt|->   Consult Codex  (blocks until the reply).
 gaslamp fleet <backend> [opts]     Fan out a fleet of consults in one command.
 gaslamp jobs [-n N]                List consult records, newest first.
 gaslamp poll <job|fleet|--last>    Print one record's reply/status (exit 10 = running).
-gaslamp setup [--local]            Clean up 1.x; allowlist; print guidance to add.
-gaslamp guidance [claude|codex]    Print the consult-guidance block (pipe with >>).
-gaslamp doctor                     Health check.
+gaslamp setup [--local]            Allowlist the command in ~/.claude/settings.json.
 
 Consult options:
   --resume <session|job>   Continue a session (a prior job id works too).

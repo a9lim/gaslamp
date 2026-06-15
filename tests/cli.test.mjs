@@ -133,11 +133,10 @@ test("--json emits a machine envelope on a clean stdout", () => {
 
 // ---- backend argv contracts ----------------------------------------------------
 
-test("claude spawn: stream-json + verbose, sentinel set, API key stripped, bridge denied", () => {
+test("claude spawn: stream-json + verbose, sentinel set, API key stripped", () => {
   const r = run(["claude", "p"], { env: { ANTHROPIC_API_KEY: "stale-key" } });
   assert.match(r.stdout, /"--output-format","stream-json"/);
   assert.match(r.stdout, /"--verbose"/);
-  assert.match(r.stdout, /"--disallowedTools","mcp__gaslamp"/);
   assert.match(r.stdout, /key=false/);   // ANTHROPIC_API_KEY stripped → keychain OAuth
   assert.match(r.stdout, /nested=1/);    // child carries the one-hop sentinel
 });
@@ -200,10 +199,10 @@ test("nested guard: a consulted agent's consult refuses (one hop), no record", (
   assert.equal(readdirSync(join(home, "jobs")).length, beforeCount);
 });
 
-test("GASLAMP_ALLOW_RECURSION restores nesting and drops the deny flag", () => {
+test("GASLAMP_ALLOW_RECURSION restores nesting", () => {
   const r = run(["claude", "p"], { env: { GASLAMP_NESTED: "1", GASLAMP_ALLOW_RECURSION: "1" } });
   assert.equal(r.status, 0);
-  assert.doesNotMatch(r.stdout, /--disallowedTools/);
+  assert.match(r.stdout, /stub claude: p/);
 });
 
 test("network-disabled sandbox refuses both backends pointedly", () => {
@@ -311,19 +310,12 @@ test("usage errors: empty prompt, unknown flag, two prompts", () => {
   assert.equal(run(["claude", "p1", "p2"]).status, 2);
 });
 
-test("serve is a tombstone pointing at setup", () => {
-  const r = run(["serve"]);
-  assert.equal(r.status, 2);
-  assert.match(r.stderr, /gaslamp setup/);
-});
-
 test("--version prints the package version; --help shows consults + exit codes", () => {
   assert.equal(run(["--version"]).stdout.trim(), PKG.version);
   const h = run(["--help"]);
   assert.equal(h.status, 0);
   assert.match(h.stdout, /gaslamp claude/);
   assert.match(h.stdout, /gaslamp fleet/);
-  assert.match(h.stdout, /gaslamp guidance/);
   assert.match(h.stdout, /session busy/);
 });
 
