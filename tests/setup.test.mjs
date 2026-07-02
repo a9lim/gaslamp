@@ -90,3 +90,26 @@ test("setup --local pins this checkout's bin path in the allowlist", () => {
   const settings = JSON.parse(readFileSync(join(fakeHome, ".claude", "settings.json"), "utf8"));
   assert.ok(settings.permissions.allow.includes(`Bash(${BIN}:*)`));
 });
+
+test("plain setup installs no skills; --skill installs a direction-aware pair", () => {
+  runSetup();
+  const claudeSkill = join(fakeHome, ".claude", "skills", "gaslamp", "SKILL.md");
+  const codexSkill = join(fakeHome, ".codex", "skills", "gaslamp", "SKILL.md");
+  assert.ok(!existsSync(claudeSkill));
+  assert.ok(!existsSync(codexSkill));
+
+  const r = runSetup(["--skill"]);
+  assert.equal(r.status, 0, r.stderr);
+  const forClaude = readFileSync(claudeSkill, "utf8");
+  const forCodex = readFileSync(codexSkill, "utf8");
+  // each copy teaches its reader to consult the OTHER agent
+  assert.match(forClaude, /^---\nname: gaslamp\n/);
+  assert.match(forClaude, /gaslamp codex "<prompt>"/);
+  assert.match(forClaude, /run_in_background/);
+  assert.match(forCodex, /gaslamp claude "<prompt>"/);
+  assert.match(forCodex, /background terminal/);
+  assert.doesNotMatch(forCodex, /run_in_background/);
+
+  // idempotent: rerun overwrites our own file, no error
+  assert.equal(runSetup(["--skill"]).status, 0);
+});

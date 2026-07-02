@@ -35,9 +35,12 @@ Usage:
                                      Print one record's reply/status.
   gaslamp tail <job|--last>          Follow one consult's events as one-liners
                                      (both backends' schemas, uniformly).
-  gaslamp setup [--local]            Allowlist the command in Claude Code so
+  gaslamp setup [--local] [--skill]  Allowlist the command in Claude Code so
                                      consults don't stall on a permission prompt.
                                      --local pins this checkout's bin path.
+                                     --skill also installs the gaslamp skill
+                                     for BOTH agents (~/.claude/skills/,
+                                     $CODEX_HOME/skills/).
 
 Consult options:
   --resume <session|job>   Continue a session (a prior job id works too).
