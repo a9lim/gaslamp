@@ -38,8 +38,13 @@ Consult options:
                            codex:  read-only | workspace-write | danger-full-access
                            Omit to defer to the consulted agent's own config.
   --cwd <dir>              Working directory for the consult (default: here).
+  --schema <file|json>     JSON Schema for the reply (native on both backends:
+                           claude --json-schema / codex --output-schema). The
+                           --json envelope gains data (the parsed object); a
+                           reply that doesn't parse marks the consult failed.
   --json                   Machine envelope on stdout:
-                           {backend, jobId, sessionId, status, exitCode, content}
+                           {backend, jobId, sessionId, status, exitCode,
+                            content, data?}
   -                        Read the prompt from stdin (default when piped).
 
 Fleet options (in addition to --model / --sandbox / --cwd / --json, applied to
@@ -47,7 +52,8 @@ every consult unless a per-task field on a stdin manifest overrides it):
   -n, --count N            Replicate the prompt across N fresh sessions.
   -j, --concurrency N      Max consults in flight (default 4 — quota-shaped).
   - < tasks.jsonl          One task per line: a {"prompt",…} JSON object (also
-                           model/sandbox/cwd/resume/label), or a bare prompt.
+                           model/sandbox/cwd/resume/label/schema — schema may
+                           be an inline JSON object), or a bare prompt.
 A fleet defaults its consults to --sandbox read-only (N writers in one cwd
 race); pass --sandbox to opt into writes. It blocks until every consult is in,
 then prints them all (--json: a results array, manifest order). A killed fleet

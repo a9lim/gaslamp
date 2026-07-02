@@ -26,7 +26,13 @@ process.stdin.on("end", () => setTimeout(() => {
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "cl-sess-1" }) + "\\n");
   const text = "stub claude: " + prompt + " || argv: " + JSON.stringify(argv) +
     " || key=" + ("ANTHROPIC_API_KEY" in process.env) + " || nested=" + (process.env.GASLAMP_NESTED || "");
-  process.stdout.write(JSON.stringify({ type: "result", result: text, session_id: "cl-sess-1", is_error: false }) + "\\n");
+  // --json-schema flips the result to structured output (unless STUB_BAD_JSON
+  // simulates a backend that failed to honor the schema).
+  const result = argv.includes("--json-schema") && !process.env.STUB_BAD_JSON
+    ? { type: "result", result: JSON.stringify({ ok: true, who: "claude" }),
+        structured_output: { ok: true, who: "claude" }, session_id: "cl-sess-1", is_error: false }
+    : { type: "result", result: text, session_id: "cl-sess-1", is_error: false };
+  process.stdout.write(JSON.stringify(result) + "\\n");
 }, Number(process.env.STUB_DELAY_MS || 0)));
 `;
 
@@ -44,7 +50,9 @@ process.stdin.on("end", () => setTimeout(() => {
   const text = "stub codex: " + prompt + " || argv: " + JSON.stringify(argv) +
     " || nested=" + (process.env.GASLAMP_NESTED || "");
   process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }) + "\\n");
-  writeFileSync(out, text);
+  // --output-schema flips the -o reply to structured JSON (unless STUB_BAD_JSON).
+  writeFileSync(out, argv.includes("--output-schema") && !process.env.STUB_BAD_JSON
+    ? JSON.stringify({ ok: true, who: "codex" }) : text);
 }, Number(process.env.STUB_DELAY_MS || 0)));
 `;
 
@@ -68,7 +76,7 @@ after(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 function env(extra = {}) {
   const e = { ...process.env };
   for (const k of ["GASLAMP_NESTED", "GASLAMP_ALLOW_RECURSION", "GASLAMP_FLEET", "CODEX_SANDBOX_NETWORK_DISABLED",
-    "GASLAMP_DEBUG", "GASLAMP_ALLOWED_TOOLS", "ANTHROPIC_API_KEY", "STUB_DELAY_MS"]) delete e[k];
+    "GASLAMP_DEBUG", "GASLAMP_ALLOWED_TOOLS", "ANTHROPIC_API_KEY", "STUB_DELAY_MS", "STUB_BAD_JSON"]) delete e[k];
   return { ...e, CLAUDE_BIN: claudeStub, CODEX_BIN: codexStub, GASLAMP_HOME: home, ...extra };
 }
 
@@ -319,6 +327,61 @@ test("--version prints the package version; --help shows consults + exit codes",
   assert.match(h.stdout, /session busy/);
 });
 
+// ---- schema ----------------------------------------------------------------------------
+
+test("claude --schema plumbs to --json-schema; envelope carries parsed data", () => {
+  const r = run(["claude", "--schema", '{"type":"object"}', "--json", "p"]);
+  assert.equal(r.status, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.deepEqual(j.data, { ok: true, who: "claude" });
+  assert.match(j.content, /"ok":\s*true/);
+  // the schema text reached the backend, and the job dir records it
+  const m = meta(j.jobId);
+  assert.equal(m.schema, true);
+  assert.equal(readFileSync(join(home, "jobs", j.jobId, "schema.json"), "utf8").trim(), '{"type":"object"}');
+});
+
+test("codex --schema materializes schema.json and passes --output-schema", () => {
+  const r = run(["codex", "--schema", '{"type":"object"}', "--json", "p"]);
+  assert.equal(r.status, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.deepEqual(j.data, { ok: true, who: "codex" });
+  const schemaPath = join(home, "jobs", j.jobId, "schema.json");
+  assert.ok(existsSync(schemaPath));
+  // the argv the stub echoed carries the --output-schema path (in events.jsonl)
+  const events = readFileSync(join(home, "jobs", j.jobId, "events.jsonl"), "utf8");
+  assert.match(events, /--output-schema/);
+});
+
+test("--schema accepts a file path", () => {
+  const schemaFile = join(dir, "verdict.schema.json");
+  writeFileSync(schemaFile, '{"type":"object","required":["ok"]}');
+  const r = run(["codex", "--schema", schemaFile, "--json", "p"]);
+  assert.equal(r.status, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.equal(readFileSync(join(home, "jobs", j.jobId, "schema.json"), "utf8").trim(),
+    '{"type":"object","required":["ok"]}');
+});
+
+test("a bad --schema is a usage error, not a mid-consult backend error", () => {
+  assert.equal(run(["claude", "--schema", "{not json", "p"]).status, 2);
+  assert.equal(run(["claude", "--schema", "/nope/missing.json", "p"]).status, 2);
+});
+
+test("a schema consult whose reply is not JSON is marked failed", () => {
+  const r = run(["claude", "--schema", '{"type":"object"}', "--json", "p"], { env: { STUB_BAD_JSON: "1" } });
+  assert.equal(r.status, 1);
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.status, "failed");
+  assert.equal(j.data, null);
+  assert.match(r.stderr, /not valid JSON/);
+});
+
+test("no --schema, no data key (envelope contract unchanged)", () => {
+  const j = JSON.parse(run(["codex", "--json", "q"]).stdout);
+  assert.ok(!("data" in j));
+});
+
 // ---- fleet -----------------------------------------------------------------------------
 
 test("fleet -n replicates a prompt across N consults, blocks, collects all", () => {
@@ -368,6 +431,15 @@ test("fleet defaults consults to read-only; --sandbox opts into writes", () => {
   // claude fleet gets the read-only mapping too
   const cl = run(["fleet", "claude", "-n", "1", "p"]);
   assert.match(cl.stdout, /"--permission-mode","default"/);
+});
+
+test("fleet: per-task schema object reaches the child as --schema; data flows back", () => {
+  const r = run(["fleet", "codex", "--json", "-"],
+    { input: '{"prompt":"typed","schema":{"type":"object"},"label":"t"}\n{"prompt":"plain"}\n' });
+  assert.equal(r.status, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.deepEqual(j.results[0].data, { ok: true, who: "codex" });
+  assert.ok(!("data" in j.results[1]));
 });
 
 test("fleet forbids duplicate resume targets (would deadlock on the lock)", () => {

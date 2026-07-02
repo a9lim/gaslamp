@@ -63,6 +63,7 @@ function parseArgs(argv) {
     else if (a === "--model" || a === "-m") o.model = val();
     else if (a === "--sandbox" || a === "-s") o.sandbox = val();
     else if (a === "--cwd" || a === "-C") o.cwd = val();
+    else if (a === "--schema") o.schema = val();
     else if (a === "--json") o.json = true;
     else if (a === "-") o.stdin = true;
     else if (a.startsWith("-") && a.length > 1) die(2, `unknown flag ${a} (see gaslamp --help)`);
@@ -86,6 +87,10 @@ function buildTasks(o) {
     if (typeof spec === "string") spec = { prompt: spec };
     if (!spec || typeof spec.prompt !== "string" || !spec.prompt.trim())
       die(2, `task ${i + 1} has no prompt`);
+    // A manifest `schema` may be an inline JSON object (the natural way to
+    // write it on a JSONL line) — normalize to the string the CLI flag takes.
+    let schema = spec.schema ?? o.schema ?? null;
+    if (schema != null && typeof schema === "object") schema = JSON.stringify(schema);
     return {
       prompt: spec.prompt,
       model: spec.model ?? o.model,
@@ -93,6 +98,7 @@ function buildTasks(o) {
       cwd: spec.cwd ?? o.cwd,
       resume: spec.resume ?? null,
       label: spec.label ?? null,
+      schema,
     };
   };
 
@@ -136,6 +142,7 @@ function childArgs(backend, task) {
   if (task.model) args.push("--model", task.model);
   if (task.sandbox) args.push("--sandbox", task.sandbox);
   if (task.cwd) args.push("--cwd", task.cwd);
+  if (task.schema) args.push("--schema", task.schema);
   args.push("-");
   return args;
 }
@@ -193,6 +200,7 @@ function runChild(backend, task, live, onStart) {
         content: envelope.content ?? "", error: envelope.status === "done" ? null : tail(err),
         stderrTail: envelope.status === "done" ? null : tail(err),
         startedAt: m?.startedAt ?? null, endedAt: m?.endedAt ?? null,
+        ...("data" in envelope ? { data: envelope.data } : {}),
       });
     });
   });
@@ -294,6 +302,7 @@ export async function runFleet(backend, argv) {
         status: r.status, exitCode: r.exitCode ?? null, content: r.content ?? "",
         error: r.error ?? null, stderrTail: r.stderrTail ?? null,
         startedAt: r.startedAt ?? null, endedAt: r.endedAt ?? null,
+        ...("data" in r ? { data: r.data } : {}),
       })),
     }) + "\n");
   } else {

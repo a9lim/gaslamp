@@ -77,6 +77,7 @@ function parseArgs(argv) {
     else if (a === "--model" || a === "-m") o.model = val();
     else if (a === "--sandbox" || a === "-s") o.sandbox = val();
     else if (a === "--cwd" || a === "-C") o.cwd = val();
+    else if (a === "--schema") o.schema = val();
     else if (a === "--json") o.json = true;
     else if (a === "-") o.prompt = "-";
     else if (a.startsWith("-") && a.length > 1) die(2, `unknown flag ${a} (see gaslamp --help)`);
@@ -84,6 +85,19 @@ function parseArgs(argv) {
     else die(2, "more than one prompt argument — quote the prompt, or pipe it on stdin");
   }
   return o;
+}
+
+// --schema takes inline JSON (anything starting with "{") or a file path.
+// Returns the schema text, checked to parse — a bad schema should die here as
+// a usage error, not forty seconds into a consult as a backend error.
+function resolveSchema(raw) {
+  let text = raw.trim();
+  if (!text.startsWith("{")) {
+    try { text = readFileSync(raw, "utf8"); }
+    catch (e) { die(2, `--schema: cannot read ${raw}: ${e.message}`); }
+  }
+  try { JSON.parse(text); } catch (e) { die(2, `--schema is not valid JSON: ${e.message}`); }
+  return text;
 }
 
 // Map --resume to a concrete session id. Accepts a prior JOB id too (the
@@ -120,11 +134,14 @@ function acquireLock(backend, sid, jobId) {
   die(5, `could not acquire the lock for session ${sid} under ${locksDir()}`);
 }
 
-function claudeArgs(o, resumeSid) {
+function claudeArgs(o, resumeSid, schemaText) {
   // stream-json (not plain json) so events land incrementally: the session id
   // arrives in the init event within seconds, and the write-through record
   // survives a killed wrapper. Plain json would buffer everything to the end.
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
+  // Native structured output: the result event carries the parsed object in
+  // `structured_output` alongside the JSON text in `result`.
+  if (schemaText) args.push("--json-schema", schemaText);
   if (o.sandbox === "read-only") {
     // --permission-mode default overrides the user's defaultMode (even
     // bypass); the allowlist restricts to read tools. A real read-only.
@@ -140,12 +157,15 @@ function claudeArgs(o, resumeSid) {
   return args; // prompt goes on stdin
 }
 
-function codexArgs(o, resumeSid, replyPath) {
+function codexArgs(o, resumeSid, replyPath, schemaPath) {
   const args = ["exec"];
   if (resumeSid) args.push("resume", resumeSid);
   // -o is the authoritative reply text (the JSONL item schema is less stable);
   // --json is the session-id channel (thread.started arrives up front).
   args.push("--json", "-o", replyPath, "--skip-git-repo-check");
+  // Native structured output; codex wants a FILE, so the schema is materialized
+  // in the job dir (works on `exec resume` too — verified on codex 0.142).
+  if (schemaPath) args.push("--output-schema", schemaPath);
   // Force the sentinel into the consulted Codex's shell env (see header).
   args.push("-c", 'shell_environment_policy.set.GASLAMP_NESTED="1"');
   // `codex exec resume` has no -s flag; -c sandbox_mode works on both forms.
@@ -180,6 +200,8 @@ export function runConsult(backend, argv) {
   }
   if (!prompt.trim()) die(2, "empty prompt");
 
+  const schemaText = o.schema ? resolveSchema(o.schema) : null;
+
   // ---- resume + lock ---------------------------------------------------------
   const resumeSid = o.resume ? resolveResume(backend, o.resume) : null;
   const id = newJobId(backend);
@@ -195,14 +217,18 @@ export function runConsult(backend, argv) {
     cwd: o.cwd || process.cwd(),
     pid: process.pid, childPid: null, exitCode: null, signal: null,
     startedAt: new Date().toISOString(), endedAt: null,
-    promptChars: prompt.length,
+    promptChars: prompt.length, schema: !!schemaText,
   };
   createJob(meta, prompt);
 
   // ---- spawn -----------------------------------------------------------------
   const bin = resolveBin(backend);
   const replyPath = join(dir, "reply.md");
-  const args = backend === "claude" ? claudeArgs(o, resumeSid) : codexArgs(o, resumeSid, replyPath);
+  // schema.json lands in the job dir for BOTH backends: codex needs the file,
+  // and the record should show what shape was asked for.
+  const schemaPath = schemaText ? join(dir, "schema.json") : null;
+  if (schemaPath) writeFileSync(schemaPath, schemaText.endsWith("\n") ? schemaText : schemaText + "\n");
+  const args = backend === "claude" ? claudeArgs(o, resumeSid, schemaText) : codexArgs(o, resumeSid, replyPath, schemaPath);
 
   const env = { ...process.env, GASLAMP_NESTED: "1" };
   // Keychain OAuth is authoritative for the consulted Claude: a stale env key
@@ -235,7 +261,7 @@ export function runConsult(backend, argv) {
   child.stderr.on("data", (d) => errlog.write(d));
 
   // ---- event stream: write through; fish out session id + reply --------------
-  let buf = "", resultText = null, resultErr = false, lastAgentText = null;
+  let buf = "", resultText = null, resultErr = false, lastAgentText = null, structuredOut;
   child.stdout.on("data", (d) => {
     events.write(d);
     buf += d.toString();
@@ -252,6 +278,7 @@ export function runConsult(backend, argv) {
       if (backend === "claude" && j.type === "result") {
         resultText = j.result ?? j.content ?? null;
         resultErr = !!j.is_error;
+        if (j.structured_output !== undefined) structuredOut = j.structured_output;
       } else if (backend === "codex" && j.type === "item.completed") {
         // Tolerant fallback if -o never lands (schema drift across versions).
         const item = j.item ?? {};
@@ -299,10 +326,26 @@ export function runConsult(backend, argv) {
     errlog.end();
     finalize(killedBy ? "killed" : (code !== 0 || resultErr) ? "failed" : "done", code);
     const reply = existsSync(replyPath) ? readFileSync(replyPath, "utf8") : null;
+
+    // A schema consult's contract is a typed reply: parse it (claude hands the
+    // object over in the result event; codex's reply.md IS the JSON), and an
+    // unparseable reply is a FAILED consult, not a quiet string.
+    let data = null;
+    if (schemaText) {
+      data = structuredOut ?? null;
+      if (data == null && reply != null) { try { data = JSON.parse(reply); } catch {} }
+      if (data == null && meta.status === "done") {
+        meta.status = "failed";
+        writeMeta(meta);
+        writeSync(2, "[gaslamp] --schema was set but the reply is not valid JSON — marking the consult failed\n");
+      }
+    }
+
     if (o.json) {
       process.stdout.write(JSON.stringify({
         backend, jobId: id, sessionId: meta.sessionId, status: meta.status,
         exitCode: code, content: reply ?? "",
+        ...(schemaText ? { data } : {}),
       }) + "\n");
     } else {
       if (reply) process.stdout.write(reply.endsWith("\n") ? reply : reply + "\n");
