@@ -127,6 +127,29 @@ function resolveSchema(raw) {
   return text;
 }
 
+// OpenAI's structured-output endpoint only accepts STRICT schemas: every
+// object node must carry additionalProperties:false and a `required` listing
+// EVERY key in properties (both verified live — it 400s otherwise). Normalize
+// on the way to codex; claude takes the schema as written. The one semantic
+// this costs is optional-by-omission — spell optional fields nullable
+// ({"type":["string","null"]}) if a codex consult may leave them out.
+export function strictify(node) {
+  if (Array.isArray(node)) return node.map(strictify);
+  if (node === null || typeof node !== "object") return node;
+  const out = {};
+  for (const [k, v] of Object.entries(node)) out[k] = k === "properties" && v && typeof v === "object"
+    ? Object.fromEntries(Object.entries(v).map(([p, s]) => [p, strictify(s)]))
+    : strictify(v);
+  const isObject = out.type === "object"
+    || (Array.isArray(out.type) && out.type.includes("object"))
+    || (out.type === undefined && out.properties != null);
+  if (isObject) {
+    out.additionalProperties ??= false;
+    if (out.properties) out.required = Object.keys(out.properties);
+  }
+  return out;
+}
+
 // Map --resume to a concrete session id. Accepts a prior JOB id too (the
 // handle the caller usually has at hand) and resolves it via the job record.
 function resolveResume(backend, resume) {
@@ -273,9 +296,15 @@ export function runConsult(backend, argv) {
   const bin = resolveBin(backend);
   const replyPath = join(dir, "reply.md");
   // schema.json lands in the job dir for BOTH backends: codex needs the file,
-  // and the record should show what shape was asked for.
+  // and the record should show what was actually sent — for codex that is the
+  // strictified form (see strictify above), for claude the schema as written.
   const schemaPath = schemaText ? join(dir, "schema.json") : null;
-  if (schemaPath) writeFileSync(schemaPath, schemaText.endsWith("\n") ? schemaText : schemaText + "\n");
+  if (schemaPath) {
+    const sent = backend === "codex"
+      ? JSON.stringify(strictify(JSON.parse(schemaText)), null, 2)
+      : schemaText;
+    writeFileSync(schemaPath, sent.endsWith("\n") ? sent : sent + "\n");
+  }
   const args = backend === "claude" ? claudeArgs(o, resumeSid, schemaText) : codexArgs(o, resumeSid, replyPath, schemaPath);
 
   const env = { ...process.env, GASLAMP_NESTED: "1" };

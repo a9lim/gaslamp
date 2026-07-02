@@ -125,6 +125,31 @@ record names in-flight children even if killed mid-run, with no human-stderr
 scraping, and the single-consult `--json` contract (exactly one envelope line)
 stays pristine.
 
+### 2.1: the interface layer
+
+2.0 built the transport; 2.1 made a consult composable, like a Workflow
+`agent()` call (designed with Fable, spar-verified by Codex, 2026-07-02):
+
+- **`--schema`** — typed replies over both backends' *native* structured
+  output (`claude --json-schema`, `codex exec --output-schema`); the `--json`
+  envelope gains `data`. Unparseable reply ⇒ the consult is marked failed.
+- **`--thread <name>`** — named sessions (pointer files under
+  `~/.gaslamp/threads/`), continue-if-bound-else-bind; `gaslamp threads` lists.
+- **prompt arg + piped stdin** — stdin becomes a `<stdin>` evidence block
+  (codex's own convention, applied to both backends).
+- **the consult preamble** — fixed framing telling the consultee its final
+  message returns verbatim to the caller; `--raw` drops it.
+- **`--effort` / `--label`**, **usage in meta + trailer**, **`jobs --json` /
+  `poll --json`** — the records grew up.
+- **fleet `--resume` / `--stream`**, full-prompt manifests — fleets became
+  interruptible and peekable. **`gaslamp tail`** — a flashlight over one
+  consult's events. **`setup --skill`** — direction-aware SKILL.md for both
+  agents.
+
+Every knob is symmetric across backends and available per-task in fleet
+manifests; every mechanism difference (schema strictness, preamble transport)
+is papered over inside gaslamp, never exposed to the caller.
+
 ## Things that are not obvious
 
 - **`shell_environment_policy.inherit = "core"` strips the sentinel.** A
@@ -170,6 +195,40 @@ stays pristine.
   user's defaultMode, even bypass) and `danger-full-access` to
   `--dangerously-skip-permissions`. Omitted = the consulted agent's own
   config, both directions.
+- **OpenAI's structured-output endpoint only accepts STRICT schemas** —
+  every object node needs `additionalProperties:false` AND a `required`
+  listing *every* key in `properties` (both verified live on codex 0.142; it
+  400s with `invalid_json_schema` otherwise). `strictify()` in consult.mjs
+  normalizes schemas on the way to codex; claude takes them as written. The
+  cost is optional-by-omission: optional fields must be spelled nullable
+  (`{"type":["string","null"]}`) for codex consults. The job dir's
+  `schema.json` records what was actually sent.
+- **claude resumes fork a NEW session id every time** (the init event reports
+  it). That's why thread pointers are re-pointed on every consult, why the
+  bind happens in the stream handler rather than at spawn, and why trailers
+  prefer `--thread <name>` over `--resume <sid>` as the printed handle — the
+  name stays hot while raw ids go stale after every hop.
+- **The preamble rides different transports per backend** — claude gets
+  `--append-system-prompt` (argv), codex gets a `<gaslamp_consult>` block
+  prepended at the spawn boundary (no equivalent flag). `prompt.md` in the
+  job dir records the CALLER's content only (prompt + evidence block), never
+  the preamble — symmetric records regardless of transport.
+- **The evidence read is cat-like.** A prompt argument plus a piped-but-open
+  stdin blocks until EOF, exactly like `cat`. Real shells close their pipes;
+  programmatic spawners must too (the fleet always has; the suite's
+  spawn-based tests learned this the hard way).
+- **`GASLAMP_ALLOWED_TOOLS` splits on commas when a comma is present**,
+  legacy whitespace otherwise — entries like `Bash(git diff:*)` carry spaces,
+  and the old `/[\s,]+/` split would shred them (caught by Codex during the
+  2.1 spar). The default read set includes read-only git for parity with
+  codex's read-only sandbox, which could always run git.
+- **Usage channels differ per backend**: claude's final result event carries
+  `usage` + `total_cost_usd`; codex emits per-turn `turn.completed.usage`
+  events, which gaslamp sums (no cost channel). Both land in `meta.usage`.
+- **Codex has a native skills dir** (`$CODEX_HOME/skills/`, same SKILL.md
+  format as `~/.claude/skills/` — verified against codex 0.142). That's what
+  makes `setup --skill` symmetric: one direction-aware skill per side, each
+  teaching its reader to consult the other agent.
 - **Exit-without-truncation.** Failure messages go through `writeSync(2, …)`
   and the close path sets `process.exitCode` instead of calling
   `process.exit()` — stdout/stderr to a *pipe* are async in Node, and a hard
@@ -212,16 +271,23 @@ the records.
 
 ## Files
 
-- `bin/gaslamp.mjs` — CLI entry; dispatches consult verbs / fleet / jobs / poll
-  / setup
-- `src/consult.mjs` — the heart: preflights, locks, spawn, stream, signals
-- `src/fleet.mjs` — bounded-concurrency fan-out over `gaslamp <backend> --json`
-- `src/jobs.mjs` — durable job + fleet records, `jobs` / `poll` readers
+- `bin/gaslamp.mjs` — CLI entry; dispatches consult verbs / fleet / jobs /
+  threads / poll / tail / setup
+- `src/consult.mjs` — the heart: preflights, locks, spawn, stream, signals,
+  schema plumbing (incl. `strictify`), preamble, evidence block
+- `src/fleet.mjs` — bounded-concurrency fan-out over `gaslamp <backend> --json`;
+  `driveFleet` engine shared by fresh runs and `fleet --resume`
+- `src/jobs.mjs` — durable job + fleet records, `jobs` / `poll` readers, usage
+  in trailers, full-prompt fleet manifests
+- `src/threads.mjs` — named session pointers; the `threads` verb
+- `src/tail.mjs` — uniform one-line event rendering; the `tail` verb
 - `src/setup.mjs` — allowlist the command (`addAllow` helper); `--local` pins
-  this checkout's absolute bin path
+  this checkout's absolute bin path; `--skill` installs the direction-aware
+  SKILL.md pair for both agents
 - `src/which.mjs` — PATH lookup without spawning a shell
 - `tests/cli.test.mjs` — consults + fleets end-to-end against stub backends
-- `tests/setup.test.mjs` — `addAllow` helper + e2e setup allowlist in a temp HOME
+- `tests/setup.test.mjs` — `addAllow` helper + e2e setup allowlist + skill
+  install in a temp HOME
 - `setup.sh` — thin from-source wrapper around `gaslamp setup --local`
 - `package.json` — npm metadata; version is the single source of truth
 
@@ -229,15 +295,16 @@ the records.
 
 | var | default | meaning |
 |-----|---------|---------|
-| `GASLAMP_HOME` | `~/.gaslamp` | state dir (jobs + locks) |
-| `GASLAMP_ALLOWED_TOOLS` | `Read Grep Glob WebFetch WebSearch` | tools the claude `read-only` override permits |
+| `GASLAMP_HOME` | `~/.gaslamp` | state dir (jobs + locks + threads) |
+| `GASLAMP_ALLOWED_TOOLS` | `Read,Grep,Glob,WebFetch,WebSearch,Bash(git diff:*),…` | tools the claude `read-only` override permits (comma-separated; legacy space lists work) |
 | `GASLAMP_ALLOW_RECURSION` | unset | let consulted agents consult back (off = one hop) |
 | `GASLAMP_NESTED` | set by gaslamp on children | the one-hop sentinel; consult verbs refuse under it. Not user-set |
 | `GASLAMP_FLEET` | set by gaslamp on fleet children | makes a child emit the early "started" receipt. Not user-set |
 | `GASLAMP_DEBUG` | unset | verbose stderr (spawn argv) |
 | `CLAUDE_BIN` / `CODEX_BIN` | autodetected | backend binaries |
+| `CODEX_HOME` | `~/.codex` | where `setup --skill` writes Codex's skill copy |
 
 Exit codes: `0` reply delivered (fleet: all consults done) · `1` consult
-failed/killed (fleet: any consult failed/killed) · `2` usage · `3` nested
-(one-hop) refusal · `4` network-disabled sandbox · `5` session busy · `poll`:
-`10` still running.
+failed/killed, incl. a schema reply that didn't parse (fleet: any consult
+failed/killed) · `2` usage · `3` nested (one-hop) refusal · `4`
+network-disabled sandbox · `5` session busy · `poll`: `10` still running.

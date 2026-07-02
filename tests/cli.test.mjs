@@ -569,8 +569,25 @@ test("--schema accepts a file path", () => {
   const r = run(["codex", "--schema", schemaFile, "--json", "p"]);
   assert.equal(r.status, 0, r.stderr);
   const j = JSON.parse(r.stdout);
-  assert.equal(readFileSync(join(home, "jobs", j.jobId, "schema.json"), "utf8").trim(),
-    '{"type":"object","required":["ok"]}');
+  const sent = JSON.parse(readFileSync(join(home, "jobs", j.jobId, "schema.json"), "utf8"));
+  assert.deepEqual(sent.required, ["ok"]);
+});
+
+test("codex schemas are strictified for OpenAI strict mode; claude's go as written", () => {
+  // verified live: codex 400s unless every object has additionalProperties:false
+  // and required lists every property key, recursively
+  const loose = '{"type":"object","properties":{"a":{"type":"string"},"nest":{"type":"object","properties":{"b":{"type":"number"}}}},"required":["a"]}';
+  const rx = run(["codex", "--schema", loose, "--json", "p"]);
+  const sent = JSON.parse(readFileSync(join(home, "jobs", JSON.parse(rx.stdout).jobId, "schema.json"), "utf8"));
+  assert.equal(sent.additionalProperties, false);
+  assert.deepEqual(sent.required, ["a", "nest"]);
+  assert.equal(sent.properties.nest.additionalProperties, false);
+  assert.deepEqual(sent.properties.nest.required, ["b"]);
+
+  const rc = run(["claude", "--schema", loose, "--json", "p"]);
+  const asWritten = JSON.parse(readFileSync(join(home, "jobs", JSON.parse(rc.stdout).jobId, "schema.json"), "utf8"));
+  assert.equal(asWritten.additionalProperties, undefined);
+  assert.deepEqual(asWritten.required, ["a"]);
 });
 
 test("a bad --schema is a usage error, not a mid-consult backend error", () => {
