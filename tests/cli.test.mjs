@@ -47,8 +47,12 @@ process.stdin.on("end", () => setTimeout(() => {
   const out = argv[argv.indexOf("-o") + 1];
   const tid = argv[1] === "resume" ? argv[2] : "cx-thread-1";
   process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: tid }) + "\\n");
+  // Consume the <gaslamp_consult> preamble block the way a real backend would,
+  // reporting it as a marker so tests can assert its presence/absence.
+  const pre = prompt.startsWith("<gaslamp_consult>\\n");
+  if (pre) prompt = prompt.replace(/^<gaslamp_consult>\\n[\\s\\S]*?\\n<\\/gaslamp_consult>\\n\\n/, "");
   const text = "stub codex: " + prompt + " || argv: " + JSON.stringify(argv) +
-    " || nested=" + (process.env.GASLAMP_NESTED || "");
+    " || nested=" + (process.env.GASLAMP_NESTED || "") + " || preamble=" + pre;
   process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }) + "\\n");
   // --output-schema flips the -o reply to structured JSON (unless STUB_BAD_JSON).
   writeFileSync(out, argv.includes("--output-schema") && !process.env.STUB_BAD_JSON
@@ -249,6 +253,7 @@ test("resume by job id refuses a backend mismatch", () => {
 test("same-session consults are serialized: busy lock refuses, kill releases", async () => {
   const slow = spawn(process.execPath, [BIN, "claude", "--resume", "sess-slow", "p"],
     { env: env({ STUB_DELAY_MS: "4000" }) });
+  slow.stdin.end(); // piped-but-open stdin would block the evidence read (cat-like)
   let serr = "";
   slow.stderr.on("data", (d) => (serr += d));
   const lock = join(home, "locks", "claude--sess-slow");
@@ -298,6 +303,7 @@ test("jobs lists records; poll fetches one; poll exits 10 while running", async 
 
   const slow = spawn(process.execPath, [BIN, "claude", "slow one"],
     { env: env({ STUB_DELAY_MS: "4000" }) });
+  slow.stdin.end(); // piped-but-open stdin would block the evidence read (cat-like)
   let serr = "";
   slow.stderr.on("data", (d) => (serr += d));
   await until(() => /job cl-/.test(serr));
@@ -325,6 +331,34 @@ test("--version prints the package version; --help shows consults + exit codes",
   assert.match(h.stdout, /gaslamp claude/);
   assert.match(h.stdout, /gaslamp fleet/);
   assert.match(h.stdout, /session busy/);
+});
+
+// ---- evidence + preamble ---------------------------------------------------------------
+
+test("prompt arg + piped stdin appends a <stdin> evidence block", () => {
+  const r = run(["claude", "review this diff:"], { input: "DIFF CONTENT\n" });
+  assert.equal(r.status, 0, r.stderr);
+  const sent = readFileSync(join(home, "jobs", jobIdFrom(r.stdout), "prompt.md"), "utf8");
+  assert.equal(sent, "review this diff:\n\n<stdin>\nDIFF CONTENT\n</stdin>");
+});
+
+test("empty piped stdin adds no evidence block", () => {
+  const r = run(["claude", "solo prompt"], { input: "" });
+  assert.equal(readFileSync(join(home, "jobs", jobIdFrom(r.stdout), "prompt.md"), "utf8"), "solo prompt");
+});
+
+test("preamble is on by default: claude via --append-system-prompt, codex in-prompt", () => {
+  const rc = run(["claude", "p"]);
+  assert.match(rc.stdout, /"--append-system-prompt"/);
+  const rx = run(["codex", "hi codex"]);
+  assert.match(rx.stdout, /preamble=true/);
+  // prompt.md records the CALLER's content only — no preamble in the record
+  assert.doesNotMatch(readFileSync(join(home, "jobs", jobIdFrom(rx.stdout), "prompt.md"), "utf8"), /gaslamp_consult/);
+});
+
+test("--raw drops the preamble on both backends", () => {
+  assert.doesNotMatch(run(["claude", "--raw", "p"]).stdout, /--append-system-prompt/);
+  assert.match(run(["codex", "--raw", "p"]).stdout, /preamble=false/);
 });
 
 // ---- schema ----------------------------------------------------------------------------
@@ -431,6 +465,19 @@ test("fleet defaults consults to read-only; --sandbox opts into writes", () => {
   // claude fleet gets the read-only mapping too
   const cl = run(["fleet", "claude", "-n", "1", "p"]);
   assert.match(cl.stdout, /"--permission-mode","default"/);
+});
+
+test("fleet: prompt arg + piped stdin shares one evidence block across replicas", () => {
+  const r = run(["fleet", "codex", "-n", "2", "find races:"], { input: "EVIDENCE\n" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal((r.stdout.match(/<stdin>\nEVIDENCE\n<\/stdin>/g) || []).length, 2);
+});
+
+test("fleet: per-task raw drops the preamble for that child only", () => {
+  const r = run(["fleet", "codex", "-"], { input: '{"prompt":"a","raw":true,"label":"bare"}\n{"prompt":"b"}\n' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /preamble=false/);
+  assert.match(r.stdout, /preamble=true/);
 });
 
 test("fleet: per-task schema object reaches the child as --schema; data flows back", () => {

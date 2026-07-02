@@ -42,18 +42,25 @@ Consult options:
                            claude --json-schema / codex --output-schema). The
                            --json envelope gains data (the parsed object); a
                            reply that doesn't parse marks the consult failed.
+  --raw                    Skip the consult preamble (the few fixed lines that
+                           tell the consultee its reply returns verbatim).
   --json                   Machine envelope on stdout:
                            {backend, jobId, sessionId, status, exitCode,
                             content, data?}
   -                        Read the prompt from stdin (default when piped).
+                           With a prompt argument, piped stdin is instead
+                           appended as a <stdin> evidence block:
+                           git diff | gaslamp codex "review for races:"
 
 Fleet options (in addition to --model / --sandbox / --cwd / --json, applied to
 every consult unless a per-task field on a stdin manifest overrides it):
   -n, --count N            Replicate the prompt across N fresh sessions.
   -j, --concurrency N      Max consults in flight (default 4 — quota-shaped).
   - < tasks.jsonl          One task per line: a {"prompt",…} JSON object (also
-                           model/sandbox/cwd/resume/label/schema — schema may
-                           be an inline JSON object), or a bare prompt.
+                           model/sandbox/cwd/resume/label/schema/raw — schema
+                           may be an inline JSON object), or a bare prompt.
+                           A prompt argument + piped stdin shares one <stdin>
+                           evidence block across every replica.
 A fleet defaults its consults to --sandbox read-only (N writers in one cwd
 race); pass --sandbox to opt into writes. It blocks until every consult is in,
 then prints them all (--json: a results array, manifest order). A killed fleet

@@ -58,6 +58,18 @@ const SANDBOXES = {
   codex: ["read-only", "workspace-write", "danger-full-access"],
 };
 
+// The consult preamble: the one piece of framing a consulted agent needs.
+// Workflow subagents are told their final text IS the return value; a consult
+// deserves the same, or it replies conversationally and promises work instead
+// of delivering it. Fixed and tiny by design — not a context-injection hook.
+// claude carries it as --append-system-prompt; codex (no such flag) gets it
+// prepended to the prompt as a <gaslamp_consult> block. --raw drops it.
+const PREAMBLE =
+  "You are being consulted by another coding agent via gaslamp; this is one hop, and you cannot consult back. " +
+  "Your final message is returned verbatim to the calling agent as the consult's result — make it the deliverable " +
+  "itself (findings, verdict, diff, answer), not a conversational reply or a promise of future work. " +
+  "Distinguish what you verified from what you infer.";
+
 function resolveBin(backend) {
   if (backend === "claude") {
     for (const c of [process.env.CLAUDE_BIN, join(homedir(), ".local/bin/claude")].filter(Boolean))
@@ -78,6 +90,7 @@ function parseArgs(argv) {
     else if (a === "--sandbox" || a === "-s") o.sandbox = val();
     else if (a === "--cwd" || a === "-C") o.cwd = val();
     else if (a === "--schema") o.schema = val();
+    else if (a === "--raw") o.raw = true;
     else if (a === "--json") o.json = true;
     else if (a === "-") o.prompt = "-";
     else if (a.startsWith("-") && a.length > 1) die(2, `unknown flag ${a} (see gaslamp --help)`);
@@ -139,6 +152,7 @@ function claudeArgs(o, resumeSid, schemaText) {
   // arrives in the init event within seconds, and the write-through record
   // survives a killed wrapper. Plain json would buffer everything to the end.
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
+  if (!o.raw) args.push("--append-system-prompt", PREAMBLE);
   // Native structured output: the result event carries the parsed object in
   // `structured_output` alongside the JSON text in `result`.
   if (schemaText) args.push("--json-schema", schemaText);
@@ -197,6 +211,13 @@ export function runConsult(backend, argv) {
   if (prompt == null || prompt === "-") {
     if (prompt == null && process.stdin.isTTY) die(2, "no prompt — pass one as an argument or pipe it on stdin");
     prompt = readFileSync(0, "utf8");
+  } else if (!process.stdin.isTTY) {
+    // Prompt on argv AND piped stdin: stdin is evidence — the diff, the log,
+    // the failing output — appended as a <stdin> block. This is codex exec's
+    // own convention for exactly this case, applied uniformly to both backends.
+    const evidence = readFileSync(0, "utf8");
+    if (evidence.trim())
+      prompt += "\n\n<stdin>\n" + (evidence.endsWith("\n") ? evidence : evidence + "\n") + "</stdin>";
   }
   if (!prompt.trim()) die(2, "empty prompt");
 
@@ -217,7 +238,7 @@ export function runConsult(backend, argv) {
     cwd: o.cwd || process.cwd(),
     pid: process.pid, childPid: null, exitCode: null, signal: null,
     startedAt: new Date().toISOString(), endedAt: null,
-    promptChars: prompt.length, schema: !!schemaText,
+    promptChars: prompt.length, schema: !!schemaText, raw: !!o.raw,
   };
   createJob(meta, prompt);
 
@@ -253,6 +274,10 @@ export function runConsult(backend, argv) {
     process.stdout.write(JSON.stringify({ type: "started", jobId: id, childPid: meta.childPid }) + "\n");
 
   child.stdin.on("error", () => {}); // EPIPE if the child dies before reading
+  // prompt.md records the CALLER's content; the preamble is mechanism, applied
+  // here at the spawn boundary (codex has no --append-system-prompt analog).
+  if (backend === "codex" && !o.raw)
+    child.stdin.write("<gaslamp_consult>\n" + PREAMBLE + "\n</gaslamp_consult>\n\n");
   child.stdin.write(prompt);
   child.stdin.end();
 

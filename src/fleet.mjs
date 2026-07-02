@@ -64,6 +64,7 @@ function parseArgs(argv) {
     else if (a === "--sandbox" || a === "-s") o.sandbox = val();
     else if (a === "--cwd" || a === "-C") o.cwd = val();
     else if (a === "--schema") o.schema = val();
+    else if (a === "--raw") o.raw = true;
     else if (a === "--json") o.json = true;
     else if (a === "-") o.stdin = true;
     else if (a.startsWith("-") && a.length > 1) die(2, `unknown flag ${a} (see gaslamp --help)`);
@@ -99,6 +100,7 @@ function buildTasks(o) {
       resume: spec.resume ?? null,
       label: spec.label ?? null,
       schema,
+      raw: spec.raw ?? o.raw ?? false,
     };
   };
 
@@ -110,7 +112,15 @@ function buildTasks(o) {
     raw = lines.map((line, i) => norm(line.startsWith("{") ? parseJsonLine(line, i) : line, i));
   } else {
     if (o.prompt == null) die(2, "no tasks — pass a prompt with -n N, or a JSONL manifest on stdin");
-    raw = Array.from({ length: o.count ?? 1 }, () => norm({ prompt: o.prompt }, 0));
+    // Prompt arg + piped stdin: stdin is evidence for every replica, same
+    // <stdin> convention as a single consult (git diff | gaslamp fleet …).
+    let prompt = o.prompt;
+    if (!process.stdin.isTTY) {
+      const evidence = readFileSync(0, "utf8");
+      if (evidence.trim())
+        prompt += "\n\n<stdin>\n" + (evidence.endsWith("\n") ? evidence : evidence + "\n") + "</stdin>";
+    }
+    raw = Array.from({ length: o.count ?? 1 }, () => norm({ prompt }, 0));
   }
 
   const width = String(raw.length).length;
@@ -143,6 +153,7 @@ function childArgs(backend, task) {
   if (task.sandbox) args.push("--sandbox", task.sandbox);
   if (task.cwd) args.push("--cwd", task.cwd);
   if (task.schema) args.push("--schema", task.schema);
+  if (task.raw) args.push("--raw");
   args.push("-");
   return args;
 }
