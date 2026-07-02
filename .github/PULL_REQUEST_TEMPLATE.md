@@ -11,8 +11,8 @@
 - [ ] `npm test` passes
 - [ ] `npm run check` passes
 - [ ] No new runtime dependencies or a strong reason is given below
-- [ ] If this touches `src/server.mjs`: I kept the Codex-mirror symmetry (OAuth key-strip, sandbox mapping) intact
-- [ ] If this changes a tool name / schema / result shape: I updated `tests/smoke.test.mjs` in the same PR
+- [ ] If this touches `src/consult.mjs`: I kept the two consult directions symmetric (OAuth key-strip, sandbox mapping, session-id capture) intact
+- [ ] If this changes a backend argv contract, the `--json` envelope, or job-record fields: I updated the tests in the same PR
 - [ ] If this is a release (version bump in `package.json`): I confirm the release workflow will publish on merge
 
 ## Notes
