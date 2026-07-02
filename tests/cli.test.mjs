@@ -286,6 +286,58 @@ test("a stale lock (dead holder) is reaped, not fatal", () => {
   assert.ok(!existsSync(join(home, "locks", "claude--sess-stale")));
 });
 
+// ---- threads ---------------------------------------------------------------------------
+
+test("--thread binds fresh, then resumes by name, chasing the session id", () => {
+  const first = run(["claude", "--thread", "spar-x", "open question"]);
+  assert.equal(first.status, 0, first.stderr);
+  assert.doesNotMatch(first.stdout, /"--resume"/); // unbound name → fresh session
+  assert.match(first.stdout, /thread: spar-x/);
+  assert.match(first.stdout, /resume: gaslamp claude --thread spar-x/);
+  const t = JSON.parse(readFileSync(join(home, "threads", "claude--spar-x.json"), "utf8"));
+  assert.equal(t.sessionId, "cl-sess-1");
+  assert.equal(t.lastJobId, jobIdFrom(first.stdout));
+
+  const second = run(["claude", "--thread", "spar-x", "follow-up"]);
+  assert.match(second.stdout, /"--resume","cl-sess-1"/); // bound name → resume
+  assert.equal(meta(jobIdFrom(second.stdout)).thread, "spar-x");
+});
+
+test("threads verb lists bound threads; codex threads bind too", () => {
+  const r = run(["codex", "--thread", "cx-spar", "p"]);
+  assert.equal(r.status, 0, r.stderr);
+  const list = run(["threads"]);
+  assert.match(list.stdout, /cx-spar\s+codex\s+cx-threa/);
+  assert.match(list.stdout, /spar-x\s+claude/);
+});
+
+test("--thread usage errors: with --resume, and bad names", () => {
+  const both = run(["claude", "--thread", "x", "--resume", "sid", "p"]);
+  assert.equal(both.status, 2);
+  assert.match(both.stderr, /exclusive/);
+  assert.equal(run(["claude", "--thread", "no spaces", "p"]).status, 2);
+  assert.equal(run(["claude", "--thread", "-leadingdash", "p"]).status, 2);
+});
+
+test("fleet: manifest thread reaches the child; duplicate threads are refused", () => {
+  const dup = run(["fleet", "codex", "-"], { input: '{"prompt":"a","thread":"fl-th"}\n{"prompt":"b","thread":"fl-th"}\n' });
+  assert.equal(dup.status, 2);
+  assert.match(dup.stderr, /same thread/);
+  const ok = run(["fleet", "codex", "-"], { input: '{"prompt":"a","thread":"fl-th"}\n' });
+  assert.equal(ok.status, 0, ok.stderr);
+  // --thread is consumed by the child gaslamp (not the backend argv): its
+  // observable effect is the binding it leaves behind
+  const t = JSON.parse(readFileSync(join(home, "threads", "codex--fl-th.json"), "utf8"));
+  assert.equal(t.sessionId, "cx-thread-1");
+});
+
+test("fleet: a bound thread collides with a direct resume of its session", () => {
+  run(["codex", "--thread", "bound-th", "p"]); // binds bound-th → cx-thread-1
+  const r = run(["fleet", "codex", "-"], { input: '{"prompt":"a","thread":"bound-th"}\n{"prompt":"b","resume":"cx-thread-1"}\n' });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /same session/);
+});
+
 // ---- jobs / poll ---------------------------------------------------------------------
 
 test("jobs lists records; poll fetches one; poll exits 10 while running", async () => {

@@ -26,6 +26,7 @@ Usage:
     -n N <prompt>                    Replicate one prompt across N fresh sessions.
     - < tasks.jsonl                  Or one task per line on stdin (see below).
   gaslamp jobs [-n N]                List consult records, newest first.
+  gaslamp threads                    List named threads, latest activity first.
   gaslamp poll <job|fleet|--last>    Print one record's reply/status.
   gaslamp setup [--local]            Allowlist the command in Claude Code so
                                      consults don't stall on a permission prompt.
@@ -33,6 +34,9 @@ Usage:
 
 Consult options:
   --resume <session|job>   Continue a session (a prior job id works too).
+  --thread <name>          Named session: continue it if the name is bound,
+                           else start fresh and bind it. The pointer chases
+                           claude's forked session ids so the name stays hot.
   --model <m>              Backend model override.
   --sandbox <mode>         claude: read-only | danger-full-access
                            codex:  read-only | workspace-write | danger-full-access
@@ -57,8 +61,9 @@ every consult unless a per-task field on a stdin manifest overrides it):
   -n, --count N            Replicate the prompt across N fresh sessions.
   -j, --concurrency N      Max consults in flight (default 4 — quota-shaped).
   - < tasks.jsonl          One task per line: a {"prompt",…} JSON object (also
-                           model/sandbox/cwd/resume/label/schema/raw — schema
-                           may be an inline JSON object), or a bare prompt.
+                           model/sandbox/cwd/resume/thread/label/schema/raw —
+                           schema may be an inline JSON object), or a bare
+                           prompt.
                            A prompt argument + piped stdin shares one <stdin>
                            evidence block across every replica.
 A fleet defaults its consults to --sandbox read-only (N writers in one cwd
@@ -102,6 +107,11 @@ switch (cmd) {
   case "jobs": {
     const { runJobs } = await import(new URL("../src/jobs.mjs", import.meta.url));
     runJobs(rest);
+    break;
+  }
+  case "threads": {
+    const { runThreads } = await import(new URL("../src/threads.mjs", import.meta.url));
+    runThreads();
     break;
   }
   case "poll": {

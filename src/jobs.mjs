@@ -61,7 +61,8 @@ export function createFleet(meta, tasks) {
   writeFileSync(join(fleetDir(meta.id), "manifest.jsonl"),
     tasks.map((t) => JSON.stringify({
       index: t.index, label: t.label, promptChars: t.prompt.length,
-      model: t.model ?? null, sandbox: t.sandbox ?? null, cwd: t.cwd ?? null, resume: t.resume ?? null,
+      model: t.model ?? null, sandbox: t.sandbox ?? null, cwd: t.cwd ?? null,
+      resume: t.resume ?? null, thread: t.thread ?? null,
     })).join("\n") + "\n");
   writeFleetMeta(meta);
 }
@@ -114,7 +115,9 @@ export function renderTrailer(meta, status = meta.status) {
     if (status === "killed") bits.push(`KILLED${meta.signal ? ` (${meta.signal})` : ""}`);
     if (status === "stale") bits.push("STALE (wrapper died mid-run)");
     bits.push(`job: ${meta.id}`, `session: ${meta.sessionId ?? "?"}`);
-    if (meta.sessionId) bits.push(`resume: gaslamp ${meta.backend} --resume ${meta.sessionId}`);
+    if (meta.thread) bits.push(`thread: ${meta.thread}`);
+    // a thread pointer chases the freshest session id; prefer it as the handle
+    if (meta.sessionId) bits.push(`resume: gaslamp ${meta.backend} ${meta.thread ? `--thread ${meta.thread}` : `--resume ${meta.sessionId}`}`);
     if (status !== "done") bits.push(`log: ${join(dir, "stderr.log")}`);
   }
   return `[gaslamp] ${bits.join(" · ")}`;

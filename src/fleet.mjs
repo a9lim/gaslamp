@@ -38,6 +38,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeSync } from "node:fs";
 import { createFleet, newFleetId, readMeta, writeFleetMeta } from "./jobs.mjs";
+import { readThread } from "./threads.mjs";
 
 const GASLAMP_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "gaslamp.mjs");
 // Quota-shaped, not CPU-shaped: the bottleneck is API rate limits, not cores
@@ -79,7 +80,7 @@ function parseArgs(argv) {
 // Flags + sources → a flat list of normalized specs, then a finalize pass that
 // stamps index + a stable label and rejects the two footguns (duplicate labels;
 // duplicate resume targets, which would deadlock on the session lock).
-function buildTasks(o) {
+function buildTasks(backend, o) {
   // Default to read-only unless the caller opts into writes (fleet-wide or
   // per-task). N writers in one cwd race; one consult deferring to config is
   // fine, N is not.
@@ -98,6 +99,7 @@ function buildTasks(o) {
       sandbox: spec.sandbox ?? baseSandbox,
       cwd: spec.cwd ?? o.cwd,
       resume: spec.resume ?? null,
+      thread: spec.thread ?? null,
       label: spec.label ?? null,
       schema,
       raw: spec.raw ?? o.raw ?? false,
@@ -124,16 +126,27 @@ function buildTasks(o) {
   }
 
   const width = String(raw.length).length;
-  const seenLabel = new Set(), seenResume = new Set();
+  const seenLabel = new Set(), seenResume = new Set(), seenThread = new Set();
   raw.forEach((t, i) => {
     t.index = i;
     if (t.label == null) t.label = `task-${String(i + 1).padStart(width, "0")}`;
     else if (seenLabel.has(t.label)) die(2, `duplicate task label "${t.label}" — labels must be unique`);
     seenLabel.add(t.label);
-    if (t.resume) {
-      if (seenResume.has(t.resume))
-        die(2, `two tasks resume the same session (${t.resume}) — they would deadlock on the session lock; give each its own session`);
-      seenResume.add(t.resume);
+    if (t.thread) {
+      if (t.resume) die(2, `task ${i + 1} has both thread and resume — a thread IS a resume handle`);
+      if (seenThread.has(t.thread))
+        die(2, `two tasks use the same thread (${t.thread}) — they would deadlock on the session lock (or race to bind it); give each its own thread`);
+      seenThread.add(t.thread);
+      // a BOUND thread is a resume in disguise: feed its session into the
+      // duplicate-resume check so thread-vs-resume collisions are caught too
+      const bound = readThread(backend, t.thread)?.sessionId;
+      if (bound) t._threadSession = bound;
+    }
+    const target = t.resume ?? t._threadSession;
+    if (target) {
+      if (seenResume.has(target))
+        die(2, `two tasks resume the same session (${target}) — they would deadlock on the session lock; give each its own session`);
+      seenResume.add(target);
     }
   });
   return raw;
@@ -149,6 +162,7 @@ function parseJsonLine(line, i) {
 function childArgs(backend, task) {
   const args = [GASLAMP_BIN, backend, "--json"];
   if (task.resume) args.push("--resume", task.resume);
+  if (task.thread) args.push("--thread", task.thread);
   if (task.model) args.push("--model", task.model);
   if (task.sandbox) args.push("--sandbox", task.sandbox);
   if (task.cwd) args.push("--cwd", task.cwd);
@@ -245,7 +259,7 @@ export async function runFleet(backend, argv) {
   if (process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1")
     die(4, "network is disabled in this sandbox (CODEX_SANDBOX_NETWORK_DISABLED=1) — consulted agents could reach neither Anthropic nor OpenAI. Re-run with network access.");
 
-  const tasks = buildTasks(o);
+  const tasks = buildTasks(backend, o);
   const concurrency = Math.min(o.concurrency, tasks.length);
 
   const fleetId = newFleetId();

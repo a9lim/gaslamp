@@ -41,6 +41,7 @@ import {
   alive, createJob, jobDir, jobsDir, locksDir, looksLikeJobId,
   newJobId, readMeta, renderTrailer, writeMeta,
 } from "./jobs.mjs";
+import { readThread, validThreadName, writeThread } from "./threads.mjs";
 
 // Tools permitted under the claude `read-only` override (advisory reviewer).
 const ALLOWED_TOOLS = (process.env.GASLAMP_ALLOWED_TOOLS || "Read Grep Glob WebFetch WebSearch")
@@ -86,6 +87,7 @@ function parseArgs(argv) {
     const a = argv[i];
     const val = () => { if (i + 1 >= argv.length) die(2, `${a} needs a value`); return argv[++i]; };
     if (a === "--resume" || a === "-r") o.resume = val();
+    else if (a === "--thread" || a === "-t") o.thread = val();
     else if (a === "--model" || a === "-m") o.model = val();
     else if (a === "--sandbox" || a === "-s") o.sandbox = val();
     else if (a === "--cwd" || a === "-C") o.cwd = val();
@@ -223,8 +225,18 @@ export function runConsult(backend, argv) {
 
   const schemaText = o.schema ? resolveSchema(o.schema) : null;
 
-  // ---- resume + lock ---------------------------------------------------------
-  const resumeSid = o.resume ? resolveResume(backend, o.resume) : null;
+  // ---- thread → resume + lock -------------------------------------------------
+  // A thread is resume-if-bound: an existing pointer supplies the session id
+  // (and the session lock below serializes concurrent consults on it); an
+  // unbound name runs fresh and binds when the backend reports its session.
+  // (Two concurrent consults racing to BIND the same new name is a caller bug;
+  // the loser's session stays reachable through its job record.)
+  if (o.thread) {
+    if (o.resume) die(2, "--thread and --resume are exclusive — a thread IS a resume handle");
+    if (!validThreadName(o.thread)) die(2, `bad thread name "${o.thread}" (letters/digits then letters, digits, . _ -; max 64)`);
+  }
+  const thread = o.thread ? readThread(backend, o.thread) : null;
+  const resumeSid = o.resume ? resolveResume(backend, o.resume) : thread?.sessionId ?? null;
   const id = newJobId(backend);
   let lockPath = resumeSid ? acquireLock(backend, resumeSid, id) : null;
   const releaseLock = () => { if (lockPath) { try { unlinkSync(lockPath); } catch {} lockPath = null; } };
@@ -233,7 +245,7 @@ export function runConsult(backend, argv) {
   const dir = jobDir(id);
   const meta = {
     id, backend, status: "running",
-    sessionId: resumeSid, resumedFrom: resumeSid,
+    sessionId: resumeSid, resumedFrom: resumeSid, thread: o.thread ?? null,
     model: o.model ?? null, sandbox: o.sandbox ?? null,
     cwd: o.cwd || process.cwd(),
     pid: process.pid, childPid: null, exitCode: null, signal: null,
@@ -299,7 +311,15 @@ export function runConsult(backend, argv) {
       const sid = backend === "claude"
         ? ((j.type === "system" && j.subtype === "init") || j.type === "result" ? j.session_id : null)
         : (j.type === "thread.started" ? (j.thread_id ?? j.threadId) : null);
-      if (sid && meta.sessionId !== sid) { meta.sessionId = sid; writeMeta(meta); } // early: the recovery handle
+      if (sid) {
+        if (meta.sessionId !== sid) { meta.sessionId = sid; writeMeta(meta); } // early: the recovery handle
+        // Bind/re-point the thread the moment the session is known — claude
+        // resumes fork a fresh session id, and the pointer must chase it.
+        if (o.thread) writeThread({
+          backend, name: o.thread, sessionId: sid, lastJobId: id,
+          createdAt: thread?.createdAt ?? meta.startedAt, updatedAt: new Date().toISOString(),
+        });
+      }
       if (backend === "claude" && j.type === "result") {
         resultText = j.result ?? j.content ?? null;
         resultErr = !!j.is_error;
