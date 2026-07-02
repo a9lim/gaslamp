@@ -37,7 +37,10 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeSync } from "node:fs";
-import { createFleet, newFleetId, readMeta, writeFleetMeta } from "./jobs.mjs";
+import {
+  createFleet, liveStatus, looksLikeFleetId, newFleetId, readFleetMeta,
+  readManifest, readMeta, readReply, writeFleetMeta,
+} from "./jobs.mjs";
 import { readThread } from "./threads.mjs";
 
 const GASLAMP_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "gaslamp.mjs");
@@ -68,6 +71,7 @@ function parseArgs(argv) {
     else if (a === "--schema") o.schema = val();
     else if (a === "--raw") o.raw = true;
     else if (a === "--json") o.json = true;
+    else if (a === "--stream") o.stream = true;
     else if (a === "-") o.stdin = true;
     else if (a.startsWith("-") && a.length > 1) die(2, `unknown flag ${a} (see gaslamp --help)`);
     else if (o.prompt == null) o.prompt = a;
@@ -251,36 +255,126 @@ async function pool(items, limit, worker) {
   return results;
 }
 
-export async function runFleet(backend, argv) {
-  if (backend !== "claude" && backend !== "codex")
-    die(2, `fleet needs a backend: gaslamp fleet <claude|codex> … (got "${backend ?? ""}")`);
-
-  const o = parseArgs(argv);
-
-  // A fleet of consults is still a consult: refuse if nested (a fleet OF fleets
-  // is exactly the recursion we guard), and refuse a network-disabled sandbox.
+// A fleet of consults is still a consult: refuse if nested (a fleet OF fleets
+// is exactly the recursion we guard), and refuse a network-disabled sandbox.
+function guards() {
   if (process.env.GASLAMP_NESTED && !process.env.GASLAMP_ALLOW_RECURSION)
     die(3, "this agent is itself a gaslamp consult — a consult is one hop. (GASLAMP_ALLOW_RECURSION=1 opts out.)");
   if (process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1")
     die(4, "network is disabled in this sandbox (CODEX_SANDBOX_NETWORK_DISABLED=1) — consulted agents could reach neither Anthropic nor OpenAI. Re-run with network access.");
+}
 
+const tryParse = (s) => { try { return JSON.parse(s); } catch { return null; } };
+
+// One result, machine shape (fleet --json results / --stream result lines).
+const shapeResult = (r) => ({
+  index: r.index, label: r.label, jobId: r.jobId, sessionId: r.sessionId,
+  status: r.status, exitCode: r.exitCode ?? null, content: r.content ?? "",
+  error: r.error ?? null, stderrTail: r.stderrTail ?? null,
+  startedAt: r.startedAt ?? null, endedAt: r.endedAt ?? null,
+  ...(r.replayed ? { replayed: true } : {}),
+  ...("data" in r ? { data: r.data } : {}),
+  ...(r.usage ? { usage: r.usage } : {}),
+});
+
+// One result, human block.
+function renderBlock(backend, r) {
+  const sid = r.sessionId ? ` · ${r.sessionId.slice(0, 8)}` : "";
+  const lines = [`\n━━ [${r.label}] ${r.status}${r.replayed ? " (replayed)" : ""} · ${r.jobId ?? "?"}${sid} ━━`];
+  if (r.content?.trim()) lines.push(r.content.trimEnd());
+  else {
+    lines.push(`(no reply — ${r.status})`);
+    if (r.stderrTail) lines.push(r.stderrTail);
+    if (r.sessionId) lines.push(`resume: gaslamp ${backend} --resume ${r.sessionId}`);
+  }
+  return lines.join("\n");
+}
+
+export async function runFleet(backend, argv) {
+  if (backend === "--resume") return runFleetResume(argv[0] ?? null, argv.slice(1));
+  if (backend !== "claude" && backend !== "codex")
+    die(2, `fleet needs a backend: gaslamp fleet <claude|codex|--resume fl-…> … (got "${backend ?? ""}")`);
+
+  const o = parseArgs(argv);
+  guards();
   const tasks = buildTasks(backend, o);
-  const concurrency = Math.min(o.concurrency, tasks.length);
+  await driveFleet(backend, tasks, [], o, null);
+}
+
+// gaslamp fleet --resume <fleet-id> — finish an interrupted fleet, Workflow-
+// resume style: done children replay their recorded replies; a killed child
+// whose session was captured is resumed with a fixed "finish and deliver"
+// nudge (the session already holds the prompt and the partial work); anything
+// else — failed, sessionless, never started — reruns fresh from the stored
+// manifest. A new fleet record is written, pointing back at the old one.
+const RESUME_NUDGE =
+  "The previous consult turn was interrupted mid-flight. Finish the task and deliver the final reply.";
+
+async function runFleetResume(oldId, argv) {
+  const o = parseArgs(argv);
+  if (o.prompt != null || o.count != null || o.stdin)
+    die(2, "fleet --resume takes no prompt or manifest — it reruns the one stored with the fleet");
+  guards();
+  if (!oldId || !looksLikeFleetId(oldId)) die(2, `fleet --resume needs a fleet id (fl-…), got "${oldId ?? ""}"`);
+  const fm = readFleetMeta(oldId);
+  if (!fm) die(2, `no fleet record ${oldId}`);
+  const manifest = readManifest(oldId);
+  if (!manifest || manifest.some((t) => typeof t.prompt !== "string"))
+    die(2, `fleet ${oldId} predates full-prompt manifests — resume its children individually (gaslamp poll ${oldId})`);
+
+  const replayed = [], tasks = [];
+  for (const t of manifest) {
+    const child = (fm.children || [])[t.index];
+    const m = child?.jobId ? readMeta(child.jobId) : null;
+    const status = m ? liveStatus(m) : "missing";
+    if (status === "running")
+      die(2, `fleet ${oldId} still has a running child (${child.jobId}) — wait for it or kill it first`);
+    if (status === "done") {
+      const reply = readReply(m.id) ?? "";
+      replayed.push({
+        index: t.index, label: t.label, jobId: m.id, sessionId: m.sessionId ?? null,
+        status: "done", exitCode: m.exitCode ?? null, content: reply,
+        error: null, stderrTail: null, startedAt: m.startedAt ?? null, endedAt: m.endedAt ?? null,
+        replayed: true,
+        ...(m.usage ? { usage: m.usage } : {}),
+        ...(m.schema ? { data: tryParse(reply) } : {}),
+      });
+    } else if ((status === "killed" || status === "stale") && (m?.sessionId || t.thread)) {
+      // the interrupted turn is lost, the session is not: nudge it to conclude
+      // (threads resume by name so the pointer keeps chasing forked ids)
+      tasks.push({ ...t, prompt: RESUME_NUDGE, resume: t.thread ? null : m.sessionId, nudged: true });
+    } else {
+      tasks.push({ ...t });
+    }
+  }
+  if (!tasks.length) note(`[gaslamp fleet] nothing left to run — all ${replayed.length} children were done; replaying`);
+  await driveFleet(fm.backend, tasks, replayed, o, oldId);
+}
+
+// The engine under both entries: spawn the live tasks, merge in replays,
+// write the new fleet record through, emit results (streamed or collected).
+async function driveFleet(backend, tasks, replayed, o, resumedFrom) {
+  const total = tasks.length + replayed.length;
+  const concurrency = Math.max(1, Math.min(o.concurrency, tasks.length));
 
   const fleetId = newFleetId();
   const meta = {
     id: fleetId, kind: "fleet", backend,
-    tasks: tasks.length, concurrency,
+    tasks: total, concurrency, resumedFrom,
     sandbox: o.sandbox ?? "read-only (default)",
     children: [], // [{ index, label, jobId, status }] — filled as they start/finish
     counts: { done: 0, failed: 0, killed: 0 },
     status: "running", pid: process.pid,
     startedAt: new Date().toISOString(), endedAt: null,
   };
+  for (const r of replayed)
+    meta.children[r.index] = { index: r.index, label: r.label, jobId: r.jobId, sessionId: r.sessionId, status: "done", replayed: true };
   createFleet(meta, tasks);
 
-  note(`[gaslamp fleet] → ${backend} · ${tasks.length} task${tasks.length === 1 ? "" : "s"} · concurrency ${concurrency} · fleet ${fleetId}`);
-  if (!o.sandbox) note(`[gaslamp fleet] consults run --sandbox read-only by default (N writers in one cwd race); pass --sandbox to change`);
+  note(`[gaslamp fleet] → ${backend} · ${total} task${total === 1 ? "" : "s"} · concurrency ${concurrency} · fleet ${fleetId}` +
+    (resumedFrom ? ` · resumed from ${resumedFrom} (${replayed.length} replayed)` : ""));
+  if (!o.sandbox && tasks.length && !resumedFrom)
+    note(`[gaslamp fleet] consults run --sandbox read-only by default (N writers in one cwd race); pass --sandbox to change`);
 
   // ---- signals: forward to live children; each kills its own backend group ----
   // Children are NOT detached, so they share our group and a terminal SIGINT
@@ -300,55 +394,57 @@ export async function runFleet(backend, argv) {
   }
 
   // ---- run ------------------------------------------------------------------
+  // --stream prints each result the moment it lands (completion order; replays
+  // first) instead of collecting until the end — the caller's harness can peek
+  // partial output mid-run and start synthesizing early.
+  const emitStream = (r) => {
+    if (o.json) process.stdout.write(JSON.stringify({ type: "result", ...shapeResult(r) }) + "\n");
+    else process.stdout.write(renderBlock(backend, r) + "\n");
+  };
+  if (o.stream) replayed.forEach(emitStream);
+
   let finished = 0;
-  const results = await pool(tasks, concurrency, async (task, i) => {
+  const liveResults = await pool(tasks, concurrency, async (task) => {
     const onStart = (jobId) => {
-      meta.children[i] = { index: i, label: task.label, jobId, status: "running" };
+      meta.children[task.index] = { index: task.index, label: task.label, jobId, status: "running" };
       writeFleetMeta(meta); // write-through: a killed fleet's record still names its children
     };
     const r = await runChild(backend, task, live, onStart);
     finished++;
-    meta.children[i] = { index: i, label: r.label, jobId: r.jobId, sessionId: r.sessionId, status: r.status };
+    meta.children[task.index] = { index: task.index, label: r.label, jobId: r.jobId, sessionId: r.sessionId, status: r.status };
     writeFleetMeta(meta);
     note(`[gaslamp fleet] ${r.status === "done" ? "✓" : "✗"} ${finished}/${tasks.length} · ${r.jobId ?? "?"} · ${r.label} · ${r.status}`);
+    if (o.stream) emitStream(r);
     return r;
   });
 
+  const results = [...replayed, ...liveResults].sort((a, b) => a.index - b.index);
   for (const r of results) {
     if (r.status === "done") meta.counts.done++;
     else if (r.status === "killed") meta.counts.killed++;
     else meta.counts.failed++;
   }
-  meta.status = killedBy ? "killed" : meta.counts.done === tasks.length ? "done" : "failed";
+  meta.status = killedBy ? "killed" : meta.counts.done === total ? "done" : "failed";
   meta.endedAt = new Date().toISOString();
   writeFleetMeta(meta);
 
-  // ---- output: block-and-collect, manifest order ----------------------------
+  // ---- output ----------------------------------------------------------------
+  // Collected: manifest order (--json: one object; human: blocks + summary).
+  // Streamed: results already emitted; close with a summary line only
+  // (--json --stream is explicit JSONL — result lines, then fleet.done).
   if (o.json) {
-    process.stdout.write(JSON.stringify({
-      fleetId, backend, tasks: tasks.length, counts: meta.counts,
-      results: results.map((r) => ({
-        index: r.index, label: r.label, jobId: r.jobId, sessionId: r.sessionId,
-        status: r.status, exitCode: r.exitCode ?? null, content: r.content ?? "",
-        error: r.error ?? null, stderrTail: r.stderrTail ?? null,
-        startedAt: r.startedAt ?? null, endedAt: r.endedAt ?? null,
-        ...("data" in r ? { data: r.data } : {}),
-        ...(r.usage ? { usage: r.usage } : {}),
-      })),
-    }) + "\n");
+    if (o.stream) {
+      process.stdout.write(JSON.stringify({ type: "fleet.done", fleetId, backend, tasks: total, counts: meta.counts }) + "\n");
+    } else {
+      process.stdout.write(JSON.stringify({
+        fleetId, backend, tasks: total, counts: meta.counts,
+        ...(resumedFrom ? { resumedFrom } : {}),
+        results: results.map(shapeResult),
+      }) + "\n");
+    }
   } else {
-    const out = [];
-    results.forEach((r) => {
-      const sid = r.sessionId ? ` · ${r.sessionId.slice(0, 8)}` : "";
-      out.push(`\n━━ [${r.label}] ${r.status} · ${r.jobId ?? "?"}${sid} ━━`);
-      if (r.content?.trim()) out.push(r.content.trimEnd());
-      else {
-        out.push(`(no reply — ${r.status})`);
-        if (r.stderrTail) out.push(r.stderrTail);
-        if (r.sessionId) out.push(`resume: gaslamp ${backend} --resume ${r.sessionId}`);
-      }
-    });
-    out.push(`\n[gaslamp fleet] ${fleetId} · ${meta.counts.done}/${tasks.length} done` +
+    const out = o.stream ? [] : results.map((r) => renderBlock(backend, r));
+    out.push(`\n[gaslamp fleet] ${fleetId} · ${meta.counts.done}/${total} done` +
       (meta.counts.failed ? ` · ${meta.counts.failed} failed` : "") +
       (meta.counts.killed ? ` · ${meta.counts.killed} killed` : "") +
       ` · poll: gaslamp poll ${fleetId}`);

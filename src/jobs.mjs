@@ -56,15 +56,25 @@ export function readFleetMeta(id) {
   try { return JSON.parse(readFileSync(join(fleetDir(id), "meta.json"), "utf8")); }
   catch { return null; }
 }
+// The manifest stores each task IN FULL (prompt included): it is what makes a
+// fleet resumable — a never-started child can only rerun from the record.
 export function createFleet(meta, tasks) {
   mkdirSync(fleetDir(meta.id), { recursive: true });
   writeFileSync(join(fleetDir(meta.id), "manifest.jsonl"),
     tasks.map((t) => JSON.stringify({
-      index: t.index, label: t.label, promptChars: t.prompt.length,
+      index: t.index, label: t.label, prompt: t.prompt,
       model: t.model ?? null, sandbox: t.sandbox ?? null, cwd: t.cwd ?? null,
       resume: t.resume ?? null, thread: t.thread ?? null, effort: t.effort ?? null,
-    })).join("\n") + "\n");
+      schema: t.schema ?? null, raw: t.raw ?? false,
+    })).join("\n") + (tasks.length ? "\n" : ""));
   writeFleetMeta(meta);
+}
+
+export function readManifest(id) {
+  try {
+    return readFileSync(join(fleetDir(id), "manifest.jsonl"), "utf8")
+      .split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  } catch { return null; }
 }
 
 export function readMeta(id) {

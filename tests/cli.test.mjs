@@ -45,6 +45,8 @@ import { writeFileSync } from "node:fs";
 let prompt = "";
 process.stdin.on("data", (d) => (prompt += d));
 process.stdin.on("end", () => setTimeout(() => {
+  // Simulate a backend that dies before reporting anything (fleet-resume tests).
+  if (process.env.STUB_FAIL_SUBSTR && prompt.includes(process.env.STUB_FAIL_SUBSTR)) process.exit(1);
   const argv = process.argv.slice(2);
   const out = argv[argv.indexOf("-o") + 1];
   const tid = argv[1] === "resume" ? argv[2] : "cx-thread-1";
@@ -83,7 +85,8 @@ after(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 function env(extra = {}) {
   const e = { ...process.env };
   for (const k of ["GASLAMP_NESTED", "GASLAMP_ALLOW_RECURSION", "GASLAMP_FLEET", "CODEX_SANDBOX_NETWORK_DISABLED",
-    "GASLAMP_DEBUG", "GASLAMP_ALLOWED_TOOLS", "ANTHROPIC_API_KEY", "STUB_DELAY_MS", "STUB_BAD_JSON"]) delete e[k];
+    "GASLAMP_DEBUG", "GASLAMP_ALLOWED_TOOLS", "ANTHROPIC_API_KEY", "STUB_DELAY_MS", "STUB_BAD_JSON",
+    "STUB_FAIL_SUBSTR"]) delete e[k];
   return { ...e, CLAUDE_BIN: claudeStub, CODEX_BIN: codexStub, GASLAMP_HOME: home, ...extra };
 }
 
@@ -657,6 +660,67 @@ test("the early started receipt is gated on GASLAMP_FLEET (single consult stays 
   assert.match(lines[0], /"type":"started"/);
   assert.ok(JSON.parse(lines[0]).jobId.startsWith("cx-"));
   assert.equal(JSON.parse(lines.at(-1)).status, "done");
+});
+
+test("fleet --resume: done children replay, failed children rerun fresh", () => {
+  const first = run(["fleet", "codex", "-"], {
+    input: '{"prompt":"alpha task","label":"alpha"}\n{"prompt":"beta task","label":"beta"}\n',
+    env: { STUB_FAIL_SUBSTR: "beta" },
+  });
+  assert.equal(first.status, 1);
+  const oldId = fleetIdFrom(first.stderr);
+  // the manifest now stores each task in full — that's what makes this possible
+  const man = readFileSync(join(home, "jobs", oldId, "manifest.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(man[1].prompt, "beta task");
+
+  const second = run(["fleet", "--resume", oldId, "--json"]);
+  assert.equal(second.status, 0, second.stderr);
+  const j = JSON.parse(second.stdout);
+  assert.equal(j.resumedFrom, oldId);
+  assert.equal(j.counts.done, 2);
+  assert.equal(j.results[0].replayed, true);
+  assert.ok(!j.results[1].replayed);
+  assert.match(j.results[1].content, /beta task/);
+  // the replayed child kept its original job id
+  const oldMeta = JSON.parse(readFileSync(join(home, "jobs", oldId, "meta.json"), "utf8"));
+  assert.equal(j.results[0].jobId, oldMeta.children[0].jobId);
+});
+
+test("fleet --resume: a killed child with a session gets nudged, not rerun", () => {
+  const first = run(["fleet", "codex", "-n", "1", "nudge me"]);
+  const oldId = fleetIdFrom(first.stderr);
+  const childId = JSON.parse(readFileSync(join(home, "jobs", oldId, "meta.json"), "utf8")).children[0].jobId;
+  const cm = meta(childId); // fabricate a wrapper killed after session capture
+  cm.status = "killed";
+  writeFileSync(join(home, "jobs", childId, "meta.json"), JSON.stringify(cm));
+
+  const second = run(["fleet", "--resume", oldId]);
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /"exec","resume","cx-thread-1"/); // same session
+  assert.match(second.stdout, /interrupted mid-flight/);        // the nudge, not the prompt
+  assert.doesNotMatch(second.stdout, /nudge me/);
+});
+
+test("fleet --resume usage errors: bad id, extra prompt", () => {
+  assert.equal(run(["fleet", "--resume", "not-a-fleet"]).status, 2);
+  assert.equal(run(["fleet", "--resume", "fl-00000000-000000-dead"]).status, 2);
+  const r = run(["fleet", "codex", "-n", "1", "p"]);
+  const id = fleetIdFrom(r.stderr);
+  assert.equal(run(["fleet", "--resume", id, "extra prompt"]).status, 2);
+});
+
+test("fleet --stream prints results as they complete; --json --stream is JSONL", () => {
+  const human = run(["fleet", "codex", "-n", "2", "--stream", "streamed"]);
+  assert.equal(human.status, 0, human.stderr);
+  assert.equal((human.stdout.match(/━━ \[task-/g) || []).length, 2);
+  assert.match(human.stdout, /2\/2 done/);
+
+  const jsonl = run(["fleet", "codex", "-n", "2", "--stream", "--json", "streamed"]);
+  const lines = jsonl.stdout.trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(lines.length, 3);
+  assert.equal(lines.filter((l) => l.type === "result").length, 2);
+  assert.equal(lines.at(-1).type, "fleet.done");
+  assert.equal(lines.at(-1).counts.done, 2);
 });
 
 test("poll <fleet-id> regroups children, deriving status from their records", () => {

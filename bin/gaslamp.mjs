@@ -25,6 +25,10 @@ Usage:
   gaslamp fleet <backend> [opts]     Fan out a fleet of consults (one command).
     -n N <prompt>                    Replicate one prompt across N fresh sessions.
     - < tasks.jsonl                  Or one task per line on stdin (see below).
+  gaslamp fleet --resume <fleet-id>  Finish an interrupted fleet: done children
+                                     replay their recorded replies, killed ones
+                                     are nudged to conclude via their sessions,
+                                     the rest rerun from the stored manifest.
   gaslamp jobs [-n N] [--json]       List consult records, newest first.
   gaslamp threads                    List named threads, latest activity first.
   gaslamp poll <job|fleet|--last> [--json]
@@ -64,6 +68,9 @@ Fleet options (in addition to --model / --sandbox / --cwd / --json, applied to
 every consult unless a per-task field on a stdin manifest overrides it):
   -n, --count N            Replicate the prompt across N fresh sessions.
   -j, --concurrency N      Max consults in flight (default 4 — quota-shaped).
+  --stream                 Print each reply the moment it completes instead of
+                           collecting to the end (with --json: JSONL — one
+                           result line per reply, then a fleet.done line).
   - < tasks.jsonl          One task per line: a {"prompt",…} JSON object (also
                            model/sandbox/effort/cwd/resume/thread/label/schema/
                            raw — schema may be an inline JSON object), or a
