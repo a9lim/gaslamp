@@ -33,6 +33,8 @@ Usage:
   gaslamp threads                    List named threads, latest activity first.
   gaslamp poll <job|fleet|--last> [--json]
                                      Print one record's reply/status.
+  gaslamp tail <job|--last>          Follow one consult's events as one-liners
+                                     (both backends' schemas, uniformly).
   gaslamp setup [--local]            Allowlist the command in Claude Code so
                                      consults don't stall on a permission prompt.
                                      --local pins this checkout's bin path.
@@ -124,6 +126,11 @@ switch (cmd) {
   case "threads": {
     const { runThreads } = await import(new URL("../src/threads.mjs", import.meta.url));
     runThreads();
+    break;
+  }
+  case "tail": {
+    const { runTail } = await import(new URL("../src/tail.mjs", import.meta.url));
+    runTail(rest);
     break;
   }
   case "poll": {

@@ -373,6 +373,45 @@ test("fleet: a bound thread collides with a direct resume of its session", () =>
   assert.match(r.stderr, /same session/);
 });
 
+// ---- tail ------------------------------------------------------------------------------
+
+test("tail renders both backends' events uniformly and exits with the job's status", () => {
+  const cl = run(["claude", "tail me"]);
+  const clTail = run(["tail", jobIdFrom(cl.stdout)]);
+  assert.equal(clTail.status, 0, clTail.stderr);
+  assert.match(clTail.stdout, /init · session cl-sess-/);
+  assert.match(clTail.stdout, /result · ok · \$0\.07/);
+  assert.match(clTail.stdout, /\[gaslamp\] job: cl-/);
+
+  const cx = run(["codex", "tail me too"]);
+  const cxTail = run(["tail", jobIdFrom(cx.stdout)]);
+  assert.equal(cxTail.status, 0, cxTail.stderr);
+  assert.match(cxTail.stdout, /init · thread cx-threa/);
+  assert.match(cxTail.stdout, /turn done · tok 50→20/);
+  assert.match(cxTail.stdout, /text · stub codex: tail me too/);
+});
+
+test("tail follows a running consult to completion", async () => {
+  const slow = spawn(process.execPath, [BIN, "claude", "tail follow"],
+    { env: env({ STUB_DELAY_MS: "1500" }) });
+  slow.stdin.end();
+  let serr = "";
+  slow.stderr.on("data", (d) => (serr += d));
+  await until(() => /job cl-/.test(serr));
+  const id = serr.match(/job (cl-\d{8}-\d{6}-[0-9a-f]{4})/)[1];
+  const tailed = run(["tail", id], { timeout: 10000 }); // blocks until the job ends
+  assert.equal(tailed.status, 0, tailed.stderr);
+  assert.match(tailed.stdout, /result · ok/);
+  await new Promise((r) => slow.on("close", r));
+});
+
+test("tail refuses fleets and unknown ids", () => {
+  const r = run(["fleet", "codex", "-n", "1", "p"]);
+  const fleetId = fleetIdFrom(r.stderr);
+  assert.equal(run(["tail", fleetId]).status, 2);
+  assert.equal(run(["tail", "cl-00000000-000000-dead"]).status, 2);
+});
+
 // ---- usage + machine readers -----------------------------------------------------------
 
 test("usage lands in meta, envelope, and trailer (claude: with cost)", () => {
