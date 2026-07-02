@@ -63,6 +63,7 @@ function parseArgs(argv) {
     else if (a === "--concurrency" || a === "-j") o.concurrency = num(a, val());
     else if (a === "--model" || a === "-m") o.model = val();
     else if (a === "--sandbox" || a === "-s") o.sandbox = val();
+    else if (a === "--effort" || a === "-e") o.effort = val();
     else if (a === "--cwd" || a === "-C") o.cwd = val();
     else if (a === "--schema") o.schema = val();
     else if (a === "--raw") o.raw = true;
@@ -97,6 +98,7 @@ function buildTasks(backend, o) {
       prompt: spec.prompt,
       model: spec.model ?? o.model,
       sandbox: spec.sandbox ?? baseSandbox,
+      effort: spec.effort ?? o.effort,
       cwd: spec.cwd ?? o.cwd,
       resume: spec.resume ?? null,
       thread: spec.thread ?? null,
@@ -165,10 +167,12 @@ function childArgs(backend, task) {
   if (task.thread) args.push("--thread", task.thread);
   if (task.model) args.push("--model", task.model);
   if (task.sandbox) args.push("--sandbox", task.sandbox);
+  if (task.effort) args.push("--effort", task.effort);
   if (task.cwd) args.push("--cwd", task.cwd);
   if (task.schema) args.push("--schema", task.schema);
   if (task.raw) args.push("--raw");
-  args.push("-");
+  // the child records the fleet's label too, so `gaslamp jobs` correlates
+  args.push("--label", task.label, "-");
   return args;
 }
 

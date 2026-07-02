@@ -38,6 +38,9 @@ Consult options:
                            else start fresh and bind it. The pointer chases
                            claude's forked session ids so the name stays hot.
   --model <m>              Backend model override.
+  --effort <level>         Reasoning effort (claude --effort / codex
+                           model_reasoning_effort).
+  --label <s>              Tag the job record (shows in gaslamp jobs).
   --sandbox <mode>         claude: read-only | danger-full-access
                            codex:  read-only | workspace-write | danger-full-access
                            Omit to defer to the consulted agent's own config.
@@ -61,9 +64,9 @@ every consult unless a per-task field on a stdin manifest overrides it):
   -n, --count N            Replicate the prompt across N fresh sessions.
   -j, --concurrency N      Max consults in flight (default 4 — quota-shaped).
   - < tasks.jsonl          One task per line: a {"prompt",…} JSON object (also
-                           model/sandbox/cwd/resume/thread/label/schema/raw —
-                           schema may be an inline JSON object), or a bare
-                           prompt.
+                           model/sandbox/effort/cwd/resume/thread/label/schema/
+                           raw — schema may be an inline JSON object), or a
+                           bare prompt.
                            A prompt argument + piped stdin shares one <stdin>
                            evidence block across every replica.
 A fleet defaults its consults to --sandbox read-only (N writers in one cwd
@@ -83,8 +86,9 @@ Exit codes:
 
 Env knobs:
   GASLAMP_HOME             state dir (default ~/.gaslamp)
-  GASLAMP_ALLOWED_TOOLS    tools the claude read-only override permits
-                           (default: Read Grep Glob WebFetch WebSearch)
+  GASLAMP_ALLOWED_TOOLS    tools the claude read-only override permits,
+                           comma-separated (default: Read,Grep,Glob,WebFetch,
+                           WebSearch + read-only git via Bash(git diff:*) etc)
   GASLAMP_ALLOW_RECURSION  let consulted agents consult back (off = one hop)
   GASLAMP_DEBUG            verbose stderr (spawn argv)
   CLAUDE_BIN / CODEX_BIN   backend binaries (autodetected otherwise)

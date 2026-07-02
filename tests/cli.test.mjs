@@ -170,6 +170,21 @@ test("model flag maps per backend", () => {
   assert.match(rx.stdout, /"-m","gpt-5.5"/);
 });
 
+test("effort flag maps per backend", () => {
+  const rc = run(["claude", "--effort", "high", "p"]);
+  assert.match(rc.stdout, /"--effort","high"/);
+  const rx = run(["codex", "--effort", "high", "p"]);
+  assert.match(rx.stdout, /model_reasoning_effort=\\"high\\"/);
+});
+
+test("--label lands in meta, envelope, and the jobs listing", () => {
+  const r = run(["codex", "--label", "spike-check", "--json", "p"]);
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.label, "spike-check");
+  assert.equal(meta(j.jobId).label, "spike-check");
+  assert.match(run(["jobs"]).stdout, /\[spike-check\] p/);
+});
+
 // ---- sandbox mapping -----------------------------------------------------------
 
 test("claude --sandbox read-only forces permission-mode default + allowlist", () => {
@@ -177,6 +192,20 @@ test("claude --sandbox read-only forces permission-mode default + allowlist", ()
   assert.match(r.stdout, /"--permission-mode","default"/);
   assert.match(r.stdout, /"--allowedTools"/);
   assert.doesNotMatch(r.stdout, /--dangerously-skip-permissions/);
+});
+
+test("read-only default allowlist keeps Bash(git diff:*) intact (comma parsing)", () => {
+  const r = run(["claude", "--sandbox", "read-only", "p"]);
+  assert.match(r.stdout, /Read,Grep,Glob,WebFetch,WebSearch,Bash\(git diff:\*\),Bash\(git log:\*\)/);
+});
+
+test("GASLAMP_ALLOWED_TOOLS: comma lists keep parens; legacy space lists still work", () => {
+  const commas = run(["claude", "--sandbox", "read-only", "p"],
+    { env: { GASLAMP_ALLOWED_TOOLS: "Read, Bash(git log:*)" } });
+  assert.match(commas.stdout, /"--allowedTools","Read,Bash\(git log:\*\)"/);
+  const spaces = run(["claude", "--sandbox", "read-only", "p"],
+    { env: { GASLAMP_ALLOWED_TOOLS: "Read Grep" } });
+  assert.match(spaces.stdout, /"--allowedTools","Read,Grep"/);
 });
 
 test("claude --sandbox danger-full-access forces skip-permissions", () => {
@@ -530,6 +559,14 @@ test("fleet: per-task raw drops the preamble for that child only", () => {
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /preamble=false/);
   assert.match(r.stdout, /preamble=true/);
+});
+
+test("fleet: --effort reaches children; fleet labels land in child job records", () => {
+  const r = run(["fleet", "codex", "-n", "1", "--effort", "low", "--json", "p"]);
+  assert.equal(r.status, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.match(j.results[0].content, /model_reasoning_effort=\\"low\\"/);
+  assert.equal(meta(j.results[0].jobId).label, "task-1");
 });
 
 test("fleet: per-task schema object reaches the child as --schema; data flows back", () => {

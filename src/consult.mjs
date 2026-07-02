@@ -44,8 +44,18 @@ import {
 import { readThread, validThreadName, writeThread } from "./threads.mjs";
 
 // Tools permitted under the claude `read-only` override (advisory reviewer).
-const ALLOWED_TOOLS = (process.env.GASLAMP_ALLOWED_TOOLS || "Read Grep Glob WebFetch WebSearch")
-  .split(/[\s,]+/).filter(Boolean).join(",");
+// The git reads matter: a reviewer that can't run `git diff`/`git log` is
+// blind to exactly the evidence it's usually asked about (codex's read-only
+// sandbox can run them; this keeps the two read-onlys comparable). Note the
+// override is "read-capable", not purely tool-read-only.
+const DEFAULT_ALLOWED_TOOLS = "Read,Grep,Glob,WebFetch,WebSearch," +
+  "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git status:*)";
+// Comma-split when a comma is present (entries like `Bash(git diff:*)` carry
+// spaces — a naive /[\s,]+/ shreds them); legacy whitespace lists still work.
+const ALLOWED_TOOLS_RAW = process.env.GASLAMP_ALLOWED_TOOLS || DEFAULT_ALLOWED_TOOLS;
+const ALLOWED_TOOLS = ALLOWED_TOOLS_RAW
+  .split(ALLOWED_TOOLS_RAW.includes(",") ? "," : /\s+/)
+  .map((s) => s.trim()).filter(Boolean).join(",");
 const ALLOW_RECURSION = !!process.env.GASLAMP_ALLOW_RECURSION;
 const DEBUG = !!process.env.GASLAMP_DEBUG;
 const log = (...a) => { if (DEBUG) writeSync(2, "[gaslamp] " + a.join(" ") + "\n"); };
@@ -90,6 +100,8 @@ function parseArgs(argv) {
     else if (a === "--thread" || a === "-t") o.thread = val();
     else if (a === "--model" || a === "-m") o.model = val();
     else if (a === "--sandbox" || a === "-s") o.sandbox = val();
+    else if (a === "--effort" || a === "-e") o.effort = val();
+    else if (a === "--label" || a === "-l") o.label = val();
     else if (a === "--cwd" || a === "-C") o.cwd = val();
     else if (a === "--schema") o.schema = val();
     else if (a === "--raw") o.raw = true;
@@ -170,6 +182,7 @@ function claudeArgs(o, resumeSid, schemaText) {
 
   if (resumeSid) args.push("--resume", resumeSid);
   if (o.model) args.push("--model", o.model);
+  if (o.effort) args.push("--effort", o.effort);
   return args; // prompt goes on stdin
 }
 
@@ -187,6 +200,7 @@ function codexArgs(o, resumeSid, replyPath, schemaPath) {
   // `codex exec resume` has no -s flag; -c sandbox_mode works on both forms.
   if (o.sandbox) args.push("-c", `sandbox_mode="${o.sandbox}"`);
   if (o.model) args.push("-m", o.model);
+  if (o.effort) args.push("-c", `model_reasoning_effort="${o.effort}"`);
   args.push("-"); // prompt on stdin, always — no argv-size or quoting traps
   return args;
 }
@@ -246,7 +260,8 @@ export function runConsult(backend, argv) {
   const meta = {
     id, backend, status: "running",
     sessionId: resumeSid, resumedFrom: resumeSid, thread: o.thread ?? null,
-    model: o.model ?? null, sandbox: o.sandbox ?? null,
+    label: o.label ?? null,
+    model: o.model ?? null, sandbox: o.sandbox ?? null, effort: o.effort ?? null,
     cwd: o.cwd || process.cwd(),
     pid: process.pid, childPid: null, exitCode: null, signal: null,
     startedAt: new Date().toISOString(), endedAt: null,
@@ -390,6 +405,7 @@ export function runConsult(backend, argv) {
       process.stdout.write(JSON.stringify({
         backend, jobId: id, sessionId: meta.sessionId, status: meta.status,
         exitCode: code, content: reply ?? "",
+        ...(meta.label ? { label: meta.label } : {}),
         ...(schemaText ? { data } : {}),
       }) + "\n");
     } else {

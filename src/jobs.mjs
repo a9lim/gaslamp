@@ -62,7 +62,7 @@ export function createFleet(meta, tasks) {
     tasks.map((t) => JSON.stringify({
       index: t.index, label: t.label, promptChars: t.prompt.length,
       model: t.model ?? null, sandbox: t.sandbox ?? null, cwd: t.cwd ?? null,
-      resume: t.resume ?? null, thread: t.thread ?? null,
+      resume: t.resume ?? null, thread: t.thread ?? null, effort: t.effort ?? null,
     })).join("\n") + "\n");
   writeFleetMeta(meta);
 }
@@ -151,12 +151,13 @@ export function runJobs(argv = []) {
     const dur = m.endedAt
       ? fmtDur(new Date(m.endedAt) - new Date(m.startedAt))
       : fmtDur(Date.now() - new Date(m.startedAt)) + (status === "running" ? "…" : "");
+    const tags = (m.label ? `[${m.label}] ` : "") + (m.thread ? `@${m.thread} ` : "");
     console.log([
       id.padEnd(23),
       status.padEnd(8),
       (m.sessionId ?? "-").slice(0, 8).padEnd(9),
       dur.padStart(8),
-      ` ${promptPreview(id)}`,
+      ` ${tags}${promptPreview(id)}`,
     ].join(" "));
   }
 }
