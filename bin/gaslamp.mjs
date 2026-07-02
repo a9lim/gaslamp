@@ -25,9 +25,10 @@ Usage:
   gaslamp fleet <backend> [opts]     Fan out a fleet of consults (one command).
     -n N <prompt>                    Replicate one prompt across N fresh sessions.
     - < tasks.jsonl                  Or one task per line on stdin (see below).
-  gaslamp jobs [-n N]                List consult records, newest first.
+  gaslamp jobs [-n N] [--json]       List consult records, newest first.
   gaslamp threads                    List named threads, latest activity first.
-  gaslamp poll <job|fleet|--last>    Print one record's reply/status.
+  gaslamp poll <job|fleet|--last> [--json]
+                                     Print one record's reply/status.
   gaslamp setup [--local]            Allowlist the command in Claude Code so
                                      consults don't stall on a permission prompt.
                                      --local pins this checkout's bin path.

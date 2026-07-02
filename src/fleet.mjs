@@ -230,6 +230,7 @@ function runChild(backend, task, live, onStart) {
         stderrTail: envelope.status === "done" ? null : tail(err),
         startedAt: m?.startedAt ?? null, endedAt: m?.endedAt ?? null,
         ...("data" in envelope ? { data: envelope.data } : {}),
+        ...(envelope.usage ? { usage: envelope.usage } : {}),
       });
     });
   });
@@ -332,6 +333,7 @@ export async function runFleet(backend, argv) {
         error: r.error ?? null, stderrTail: r.stderrTail ?? null,
         startedAt: r.startedAt ?? null, endedAt: r.endedAt ?? null,
         ...("data" in r ? { data: r.data } : {}),
+        ...(r.usage ? { usage: r.usage } : {}),
       })),
     }) + "\n");
   } else {

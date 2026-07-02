@@ -314,6 +314,7 @@ export function runConsult(backend, argv) {
 
   // ---- event stream: write through; fish out session id + reply --------------
   let buf = "", resultText = null, resultErr = false, lastAgentText = null, structuredOut;
+  const usageAcc = { input: 0, output: 0 }; // codex reports per turn; sum them
   child.stdout.on("data", (d) => {
     events.write(d);
     buf += d.toString();
@@ -339,6 +340,18 @@ export function runConsult(backend, argv) {
         resultText = j.result ?? j.content ?? null;
         resultErr = !!j.is_error;
         if (j.structured_output !== undefined) structuredOut = j.structured_output;
+        // Fleets are quota-shaped, so quota should be visible: inputTokens
+        // counts cache reads/writes too (that's what the meter meters).
+        if (j.usage) meta.usage = {
+          inputTokens: (j.usage.input_tokens ?? 0) + (j.usage.cache_read_input_tokens ?? 0)
+            + (j.usage.cache_creation_input_tokens ?? 0),
+          outputTokens: j.usage.output_tokens ?? 0,
+          costUsd: j.total_cost_usd ?? null,
+        };
+      } else if (backend === "codex" && j.type === "turn.completed" && j.usage) {
+        usageAcc.input += (j.usage.input_tokens ?? 0) + (j.usage.cached_input_tokens ?? 0);
+        usageAcc.output += j.usage.output_tokens ?? 0;
+        meta.usage = { inputTokens: usageAcc.input, outputTokens: usageAcc.output, costUsd: null };
       } else if (backend === "codex" && j.type === "item.completed") {
         // Tolerant fallback if -o never lands (schema drift across versions).
         const item = j.item ?? {};
@@ -406,6 +419,7 @@ export function runConsult(backend, argv) {
         backend, jobId: id, sessionId: meta.sessionId, status: meta.status,
         exitCode: code, content: reply ?? "",
         ...(meta.label ? { label: meta.label } : {}),
+        ...(meta.usage ? { usage: meta.usage } : {}),
         ...(schemaText ? { data } : {}),
       }) + "\n");
     } else {

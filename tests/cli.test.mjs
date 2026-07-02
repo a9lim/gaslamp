@@ -32,6 +32,8 @@ process.stdin.on("end", () => setTimeout(() => {
     ? { type: "result", result: JSON.stringify({ ok: true, who: "claude" }),
         structured_output: { ok: true, who: "claude" }, session_id: "cl-sess-1", is_error: false }
     : { type: "result", result: text, session_id: "cl-sess-1", is_error: false };
+  result.usage = { input_tokens: 10, cache_read_input_tokens: 90, output_tokens: 200 };
+  result.total_cost_usd = 0.07;
   process.stdout.write(JSON.stringify(result) + "\\n");
 }, Number(process.env.STUB_DELAY_MS || 0)));
 `;
@@ -53,6 +55,7 @@ process.stdin.on("end", () => setTimeout(() => {
   if (pre) prompt = prompt.replace(/^<gaslamp_consult>\\n[\\s\\S]*?\\n<\\/gaslamp_consult>\\n\\n/, "");
   const text = "stub codex: " + prompt + " || argv: " + JSON.stringify(argv) +
     " || nested=" + (process.env.GASLAMP_NESTED || "") + " || preamble=" + pre;
+  process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 50, cached_input_tokens: 10, output_tokens: 20 } }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text } }) + "\\n");
   // --output-schema flips the -o reply to structured JSON (unless STUB_BAD_JSON).
   writeFileSync(out, argv.includes("--output-schema") && !process.env.STUB_BAD_JSON
@@ -365,6 +368,56 @@ test("fleet: a bound thread collides with a direct resume of its session", () =>
   const r = run(["fleet", "codex", "-"], { input: '{"prompt":"a","thread":"bound-th"}\n{"prompt":"b","resume":"cx-thread-1"}\n' });
   assert.equal(r.status, 2);
   assert.match(r.stderr, /same session/);
+});
+
+// ---- usage + machine readers -----------------------------------------------------------
+
+test("usage lands in meta, envelope, and trailer (claude: with cost)", () => {
+  const r = run(["claude", "--json", "p"]);
+  const j = JSON.parse(r.stdout);
+  assert.deepEqual(j.usage, { inputTokens: 100, outputTokens: 200, costUsd: 0.07 });
+  assert.deepEqual(meta(j.jobId).usage, j.usage);
+  const text = run(["claude", "p"]);
+  assert.match(text.stdout, /tok: 100→200 · \$0\.07/);
+});
+
+test("codex usage sums turn.completed events (no cost channel)", () => {
+  const j = JSON.parse(run(["codex", "--json", "p"]).stdout);
+  assert.deepEqual(j.usage, { inputTokens: 60, outputTokens: 20, costUsd: null });
+});
+
+test("jobs --json lists machine-readable records", () => {
+  const done = run(["claude", "--label", "json-jobs", "machine list me"]);
+  const id = jobIdFrom(done.stdout);
+  const list = JSON.parse(run(["jobs", "--json"]).stdout);
+  const rec = list.find((r) => r.jobId === id);
+  assert.equal(rec.status, "done");
+  assert.equal(rec.label, "json-jobs");
+  assert.equal(rec.backend, "claude");
+  assert.match(rec.promptPreview, /machine list me/);
+  assert.equal(rec.usage.outputTokens, 200);
+});
+
+test("poll --json emits the envelope shape, with data for schema jobs", () => {
+  const done = run(["codex", "--schema", '{"type":"object"}', "--json", "p"]);
+  const id = JSON.parse(done.stdout).jobId;
+  const p = run(["poll", id, "--json"]);
+  assert.equal(p.status, 0);
+  const j = JSON.parse(p.stdout);
+  assert.equal(j.jobId, id);
+  assert.equal(j.status, "done");
+  assert.deepEqual(j.data, { ok: true, who: "codex" });
+});
+
+test("poll <fleet-id> --json regroups children as a results array", () => {
+  const r = run(["fleet", "claude", "-n", "2", "fleet json poll"]);
+  const fleetId = fleetIdFrom(r.stderr);
+  const p = run(["poll", fleetId, "--json"]);
+  assert.equal(p.status, 0, p.stderr);
+  const j = JSON.parse(p.stdout);
+  assert.equal(j.counts.done, 2);
+  assert.equal(j.results.length, 2);
+  assert.match(j.results[0].content, /fleet json poll/);
 });
 
 // ---- jobs / poll ---------------------------------------------------------------------

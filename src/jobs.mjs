@@ -103,6 +103,11 @@ export function liveStatus(meta) {
   return meta.pid && alive(meta.pid) ? "running" : "stale";
 }
 
+const fmtTok = (n) => n >= 10000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+const fmtUsage = (u) =>
+  `tok: ${fmtTok(u.inputTokens ?? 0)}→${fmtTok(u.outputTokens ?? 0)}` +
+  (u.costUsd != null ? ` · $${u.costUsd.toFixed(2)}` : "");
+
 // The one-line, greppable record of a consult — printed after every reply and
 // by `poll`. Always carries the two handles that matter: job id and session id.
 export function renderTrailer(meta, status = meta.status) {
@@ -118,6 +123,7 @@ export function renderTrailer(meta, status = meta.status) {
     if (meta.thread) bits.push(`thread: ${meta.thread}`);
     // a thread pointer chases the freshest session id; prefer it as the handle
     if (meta.sessionId) bits.push(`resume: gaslamp ${meta.backend} ${meta.thread ? `--thread ${meta.thread}` : `--resume ${meta.sessionId}`}`);
+    if (meta.usage) bits.push(fmtUsage(meta.usage));
     if (status !== "done") bits.push(`log: ${join(dir, "stderr.log")}`);
   }
   return `[gaslamp] ${bits.join(" · ")}`;
@@ -137,12 +143,25 @@ function fmtDur(ms) {
   return s < 100 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
 }
 
-// gaslamp jobs [-n N] — newest first, one line per consult.
+// gaslamp jobs [-n N] [--json] — newest first, one line per consult.
 export function runJobs(argv = []) {
   let n = 20;
   const i = argv.indexOf("-n");
   if (i >= 0) n = Number(argv[i + 1]) || n;
   const ids = listJobIds().slice(0, n);
+  if (argv.includes("--json")) {
+    const list = ids.map((id) => {
+      const m = readMeta(id);
+      return m && {
+        jobId: m.id, backend: m.backend, status: liveStatus(m), sessionId: m.sessionId ?? null,
+        label: m.label ?? null, thread: m.thread ?? null,
+        startedAt: m.startedAt ?? null, endedAt: m.endedAt ?? null,
+        usage: m.usage ?? null, promptPreview: promptPreview(id, 80),
+      };
+    }).filter(Boolean);
+    process.stdout.write(JSON.stringify(list) + "\n");
+    return;
+  }
   if (!ids.length) { console.log(`no jobs yet under ${jobsDir()}`); return; }
   for (const id of ids) {
     const m = readMeta(id);
@@ -162,18 +181,34 @@ export function runJobs(argv = []) {
   }
 }
 
-// gaslamp poll <job|fleet|--last> — print one record's reply/status.
+// gaslamp poll <job|fleet|--last> [--json] — print one record's reply/status.
 // Exit: 0 done · 1 failed/killed/stale · 2 usage · 10 still running.
 export function runPoll(argv = []) {
+  const json = argv.includes("--json");
   let id = argv.find((a) => !a.startsWith("-"));
   if (!id || argv.includes("--last")) id = listJobIds()[0];
   if (!id) { console.error(`gaslamp poll: no jobs under ${jobsDir()}`); process.exitCode = 2; return; }
-  if (looksLikeFleetId(id)) return pollFleet(id);
+  if (looksLikeFleetId(id)) return pollFleet(id, json);
   const m = readMeta(id);
   if (!m) { console.error(`gaslamp poll: no job record ${id}`); process.exitCode = 2; return; }
   const status = liveStatus(m);
+  const reply = status === "running" ? null : readReply(id);
+  if (json) {
+    // The consult envelope shape, recomputed from the record.
+    let data = null;
+    if (m.schema && reply != null) { try { data = JSON.parse(reply); } catch {} }
+    process.stdout.write(JSON.stringify({
+      backend: m.backend, jobId: m.id, sessionId: m.sessionId ?? null, status,
+      exitCode: m.exitCode ?? null, content: reply ?? "",
+      ...(m.label ? { label: m.label } : {}),
+      ...(m.thread ? { thread: m.thread } : {}),
+      ...(m.usage ? { usage: m.usage } : {}),
+      ...(m.schema ? { data } : {}),
+    }) + "\n");
+    process.exitCode = status === "running" ? 10 : status === "done" ? 0 : 1;
+    return;
+  }
   if (status === "running") { console.log(renderTrailer(m, status)); process.exitCode = 10; return; }
-  const reply = readReply(id);
   if (reply) process.stdout.write(reply.endsWith("\n") ? reply : reply + "\n");
   console.log(renderTrailer(m, status));
   process.exitCode = status === "done" ? 0 : 1;
@@ -182,29 +217,47 @@ export function runPoll(argv = []) {
 // gaslamp poll <fleet-id> — recompute every child's state from its own record
 // (the fleet meta is grouping, not authority) and print each reply.
 // Exit: 0 all done · 1 some failed/killed · 2 usage · 10 some still running.
-function pollFleet(id) {
+function pollFleet(id, json = false) {
   const fm = readFleetMeta(id);
   if (!fm) { console.error(`gaslamp poll: no fleet record ${id} under ${jobsDir()}`); process.exitCode = 2; return; }
   const children = (fm.children || []).filter((c) => c && c.jobId);
   let running = 0, done = 0, other = 0;
-  const out = [];
+  const out = [], results = [];
   for (const c of children) {
     const m = readMeta(c.jobId);
     const status = m ? liveStatus(m) : "missing";
     if (status === "running") running++;
     else if (status === "done") done++;
     else other++;
+    const reply = status === "done" ? readReply(c.jobId) : null;
+    if (json) {
+      let data = null;
+      if (m?.schema && reply != null) { try { data = JSON.parse(reply); } catch {} }
+      results.push({
+        index: c.index, label: c.label ?? null, jobId: c.jobId,
+        sessionId: m?.sessionId ?? null, status, content: reply ?? "",
+        ...(m?.usage ? { usage: m.usage } : {}),
+        ...(m?.schema ? { data } : {}),
+      });
+      continue;
+    }
     const sid = m?.sessionId ? ` · ${m.sessionId.slice(0, 8)}` : "";
     out.push(`\n━━ [${c.label ?? c.index}] ${status} · ${c.jobId}${sid} ━━`);
-    const reply = status === "done" ? readReply(c.jobId) : null;
     if (reply?.trim()) out.push(reply.trimEnd());
     else if (status !== "running") {
       out.push(`(no reply — ${status})`);
       if (m?.sessionId) out.push(`resume: gaslamp ${m.backend} --resume ${m.sessionId}`);
     }
   }
-  if (out.length) process.stdout.write(out.join("\n") + "\n");
-  console.log(`[gaslamp fleet] ${id} · ${fm.backend} · ${done}/${children.length} done` +
-    (running ? ` · ${running} running` : "") + (other ? ` · ${other} failed/killed` : ""));
+  if (json) {
+    process.stdout.write(JSON.stringify({
+      fleetId: id, backend: fm.backend,
+      counts: { done, running, other }, results,
+    }) + "\n");
+  } else {
+    if (out.length) process.stdout.write(out.join("\n") + "\n");
+    console.log(`[gaslamp fleet] ${id} · ${fm.backend} · ${done}/${children.length} done` +
+      (running ? ` · ${running} running` : "") + (other ? ` · ${other} failed/killed` : ""));
+  }
   process.exitCode = running ? 10 : (children.length && done === children.length) ? 0 : 1;
 }
