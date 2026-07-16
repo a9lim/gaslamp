@@ -179,6 +179,17 @@ is papered over inside gaslamp, never exposed to the caller.
   for both backends (the wrapper can't reach Anthropic *or* OpenAI from
   there). Published-package users on stock sandboxes hit this; full-access
   setups never do.
+- **Codex looks for `codex-code-mode-host` as a sibling of the path it was
+  invoked as, symlinks unresolved.** The standalone package installs
+  `~/.local/bin/codex` as a bare symlink into
+  `~/.codex/packages/standalone/current/bin/`, so a codex spawned via the
+  symlink hunts for the host next to the *symlink*, finds nothing, and every
+  tool call dies with `failed to spawn code-mode host …: No such file or
+  directory` — the consulted agent is alive and articulate but can neither
+  read nor write (verified on codex 0.144; this was sol's missing file access
+  at first contact, 2026-07-09). `resolveBin` therefore realpaths the codex
+  binary before spawning; the desktop app never hits it because it runs the
+  bundled binary directly.
 - **Session id channels differ per backend, and codex's reply comes from
   `-o`.** claude stream-json: `{"type":"system","subtype":"init","session_id"}`
   first, `{"type":"result","result","is_error","session_id"}` last — both

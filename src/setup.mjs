@@ -89,6 +89,27 @@ The \`--json\` envelope then carries \`data\` (the parsed object). A reply that 
 
 Fleets default to \`--sandbox read-only\` (N writers in one cwd race) — pass \`--sandbox\` to opt into writes. Duplicate resume/thread targets are refused up front.
 
+## Picking a model
+
+${other === "codex"
+    ? `Codex tiers, strongest first — pass the full id to \`--model\` (bare tier names are rejected):
+
+| tier | \`--model\` | ≈ claude | reach for it when |
+|------|-----------|----------|-------------------|
+| sol | \`gpt-5.6-sol\` | fable | the hardest reasoning: adversarial verification, design spars, proofs |
+| terra | \`gpt-5.6-terra\` | opus | substantial work: reviews, diagnosis, real implementation |
+| luna | \`gpt-5.6-luna\` | sonnet | quick checks, mechanical transforms, high-N fleets |`
+    : `Claude tiers, strongest first — \`--model\` takes the bare alias:
+
+| \`--model\` | ≈ codex | reach for it when |
+|-----------|---------|-------------------|
+| \`fable\` | sol | the hardest reasoning: adversarial verification, design spars, proofs |
+| \`opus\` | terra | substantial work: reviews, diagnosis, real implementation |
+| \`sonnet\` | luna | quick checks, mechanical transforms, high-N fleets |
+| \`haiku\` | (below luna) | pings, one-word sanity checks, the cheapest fan-outs |`}
+
+Omit \`--model\` to use ${Other}'s own configured default. Match the tier to the stakes: verification you'll rely on deserves the top tier; a fleet vote usually doesn't.
+
 ## Reading the records
 
     gaslamp jobs [--json]                 # recent consults: status, label, thread, tokens

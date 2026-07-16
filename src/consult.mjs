@@ -33,7 +33,7 @@
 //   (one-hop) refusal · 4 network-disabled sandbox · 5 session busy
 
 import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { which } from "./which.mjs";
@@ -87,8 +87,16 @@ function resolveBin(backend) {
       if (existsSync(c)) return c;
     return which("claude") || "claude";
   }
-  if (process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN)) return process.env.CODEX_BIN;
-  return which("codex") || "codex";
+  // codex looks for its helper binaries (codex-code-mode-host) as SIBLINGS of
+  // the path it was invoked as, without resolving symlinks. The standalone
+  // package's ~/.local/bin/codex is a bare symlink, so spawning it kills the
+  // consulted agent's whole execution bridge ("failed to spawn code-mode
+  // host…"): it can neither read nor write. Spawn the real binary instead.
+  const found = process.env.CODEX_BIN && existsSync(process.env.CODEX_BIN)
+    ? process.env.CODEX_BIN
+    : which("codex");
+  if (!found) return "codex";
+  try { return realpathSync(found); } catch { return found; }
 }
 
 function parseArgs(argv) {
