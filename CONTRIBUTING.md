@@ -1,38 +1,39 @@
 # Contributing
 
-Thank you for the interest. 
+Thank you for the interest.
 
 ## Zero dependencies
 
-Don't add runtime deps. Dev tooling beyond what ships with node (the built-in test 
-runner) needs a strong reason.
+Don't add runtime deps. Dev tooling beyond what ships with node (the built-in
+test runner) needs a strong reason.
 
-## Before you change `src/server.mjs`
+## Before you change the consult engine
 
-It's a deliberate **mirror of `codex mcp-server`** so the two consultation
-directions stay symmetric. 
-
-Read the header comment and point your agent at the AGENTS.md before touching 
-either. Changing the interface shape away from the Codex mirror needs justifying 
+`src/consult.mjs` is the heart, and both spawn directions (Claude → Codex,
+Codex → Claude) are deliberately kept symmetric. Read the header comments and
+`AGENTS.md` ("Things that are not obvious") before touching it — several flags
+encode hard-won, non-obvious backend behavior. Changing the backend argv
+contract, the session-id capture, or the kill/resume semantics needs justifying
 on review.
 
 ## Test plan
 
 ```sh
-npm test          # node --test against a stub claude binary (no real Claude)
+npm test          # node --test against stub claude AND codex binaries
 npm run check     # node -c syntax check on every source file
 ```
 
-`npm test` spins up the actual server over stdio and exercises the full handshake. 
-If you change tool names, the input/output schema, or the result shape, update 
-`tests/smoke.test.mjs` in the same PR.
+`npm test` drives both consult directions and the fleet end-to-end against stub
+backends — no real agent in the loop. If you change a backend argv contract, the
+`--json` envelope shape, or the job-record fields, update the tests in the same
+PR.
 
 ## Releasing
 
-Version lives in `package.json` and is the single source of truth. Bump it on a 
+Version lives in `package.json` and is the single source of truth. Bump it on a
 change you want published.
 
 ## License
 
-By contributing you agree your contributions are licensed under AGPL-3.0-or-later, 
-same as the rest of the project.
+By contributing you agree your contributions are licensed under
+AGPL-3.0-or-later, same as the rest of the project.

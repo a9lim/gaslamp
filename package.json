@@ -1,13 +1,10 @@
 {
   "name": "gaslamp",
-  "version": "1.1.0",
-  "description": "Minimal MCP server that lets Claude and Codex talk to each other.",
+  "version": "2.1.1",
+  "description": "Let Claude Code and Codex consult each other from the shell.",
   "type": "module",
   "bin": {
     "gaslamp": "bin/gaslamp.mjs"
-  },
-  "exports": {
-    ".": "./src/server.mjs"
   },
   "files": [
     "bin/",
@@ -18,20 +15,18 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "check": "for f in bin/gaslamp.mjs src/*.mjs tests/*.mjs; do node -c \"$f\"; done",
-    "setup": "node bin/gaslamp.mjs setup",
-    "doctor": "node bin/gaslamp.mjs doctor"
+    "setup": "node bin/gaslamp.mjs setup"
   },
   "keywords": [
-    "mcp",
-    "model-context-protocol",
     "claude",
     "claude-code",
     "codex",
     "llm",
     "agent",
     "ai",
+    "cli",
     "code-review",
-    "stdio"
+    "consult"
   ],
   "author": "a9lim <mx@a9l.im>",
   "license": "AGPL-3.0-or-later",

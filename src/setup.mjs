@@ -1,128 +1,174 @@
-// setup.mjs — register both consultation channels under the name `gaslamp`.
+// setup.mjs — allowlist the gaslamp CLI for Claude Code; optionally install
+// the gaslamp skill for both agents.
 //
-// Two directions:
-//   Codex → Claude : Codex gets a `gaslamp` tool that hands off to this server.
-//   Claude → Codex : Claude gets Codex's native `codex mcp-server` (its `codex`
-//                    / `codex-reply` tools), registered as `gaslamp`.
+// gaslamp has no MCP servers and nothing to register. Base setup does one
+// thing: allowlist the command in ~/.claude/settings.json so a consult doesn't
+// stall on a permission prompt mid-call. (Codex needs no analog — shell
+// commands are governed by approval_policy.)
 //
-// Idempotent: removes prior registrations (including the legacy `claude` /
-// `codex` names) before re-adding.
+// It does NOT touch your agent instructions. A CLI can't self-advertise the way
+// MCP tools did, so each agent needs a one-line note in its instructions to know
+// gaslamp exists — but appending to your personal CLAUDE.md / AGENTS.md is yours
+// to do (the README has the text to paste), not a surprise setup springs.
 //
-//   gaslamp setup            register the published package (Codex spawns
-//                            `npx -y gaslamp serve`). Survives node upgrades —
-//                            no absolute, version-pinned paths.
-//   gaslamp setup --local    register THIS checkout (Codex spawns
-//                            `<node> <abs>/bin/gaslamp.mjs serve`). Use before
-//                            the package is published, or for from-source dev.
+// --skill is the opt-in richer alternative: both CLIs speak the same SKILL.md
+// standard (~/.claude/skills/, $CODEX_HOME/skills/), so one flag installs a
+// direction-aware skill on each side — Claude's copy teaches consulting Codex,
+// Codex's copy teaches consulting Claude. It only ever writes gaslamp's OWN
+// skill directory, so reruns are idempotent overwrites of our own file.
+//
+//   gaslamp setup            published install (`gaslamp` on PATH)
+//   gaslamp setup --local    THIS checkout (absolute bin path; from-source dev)
+//   gaslamp setup --skill    also install the gaslamp skill for both agents
 
-import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { which } from "./which.mjs";
 
-function run(label, cmd, args) {
-  process.stdout.write(`  ${label}: ${cmd} ${args.join(" ")}\n`);
-  const r = spawnSync(cmd, args, { stdio: "inherit" });
-  return r.status === 0;
+// Add an entry to permissions.allow in a settings.json text. Returns the new
+// text, or null if the existing text isn't valid JSON (never clobber).
+export function addAllow(text, entry) {
+  let obj = {};
+  if (text && text.trim()) {
+    try { obj = JSON.parse(text); } catch { return null; }
+  }
+  obj.permissions ??= {};
+  obj.permissions.allow ??= [];
+  if (!obj.permissions.allow.includes(entry)) obj.permissions.allow.push(entry);
+  return JSON.stringify(obj, null, 2) + "\n";
 }
 
-// `codex mcp add` cannot persist per-server timeouts (its `-c` flag is a runtime
-// override that never lands in the block), so we patch ~/.codex/config.toml
-// directly. Without this, Codex's MCP client kills any tools/call that runs past
-// its default tool_timeout_sec — a substantial consult (30-45 min) dies with
-// `timed out awaiting tools/call after 120s` while the gaslamp child keeps
-// working, orphaned. The server itself has no timeout; this is the client side.
-// Idempotent: sets the keys in-place if present, inserts them if not.
-function patchCodexTimeouts() {
-  const tool = process.env.GASLAMP_TOOL_TIMEOUT_SEC || "100000"; // ~27.8h — matches Claude Code's own default MCP tool timeout (1e8 ms), so both directions are symmetric
-  const startup = process.env.GASLAMP_STARTUP_TIMEOUT_SEC || "30"; // headroom for npx cold-start
-  const cfgPath = join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
+// The skill text, parameterized by which agent is reading it: `other` is the
+// backend this copy teaches its reader to consult.
+export function skillMd(other) {
+  const Other = other === "codex" ? "Codex" : "Claude";
+  const backgroundHint = other === "codex"
+    ? "Run a consult as a background shell task (`run_in_background`) and keep working — the reply lands when it finishes, and several can run in parallel."
+    : "Run a consult in your background terminal and check back between steps — several can run in parallel.";
+  return `---
+name: gaslamp
+description: Consult ${Other} (the other coding agent) from the shell for a second pair of eyes — verify a fix or proof, spar on a design, review a diff, diagnose with fresh context — or fan out a fleet of parallel consults. Use when work would benefit from an independent take, when a claim deserves adversarial checking before you rely on it, or when explicitly asked to consult ${Other} / get a second opinion / hand work off.
+---
 
-  let text;
-  try { text = readFileSync(cfgPath, "utf8"); }
-  catch { console.warn(`  (could not read ${cfgPath}; skipped timeout patch)`); return; }
+# Consulting ${Other} via gaslamp
 
-  const lines = text.split("\n");
-  const header = lines.findIndex((l) => l.trim() === "[mcp_servers.gaslamp]");
-  if (header < 0) { console.warn("  (no [mcp_servers.gaslamp] block found; skipped timeout patch)"); return; }
+One blocking consult:
 
-  // Block runs from the header to the next table header (line starting with `[`).
-  let end = lines.length;
-  for (let i = header + 1; i < lines.length; i++) { if (/^\s*\[/.test(lines[i])) { end = i; break; } }
-  const block = lines.slice(header, end);
+    gaslamp ${other} "<prompt>"
+    gaslamp ${other} - < notes.md                       # whole prompt from a file
+    git diff | gaslamp ${other} "review for races:"     # prompt + piped evidence
 
-  const setKey = (key, val) => {
-    const i = block.findIndex((l) => new RegExp(`^\\s*${key}\\s*=`).test(l));
-    if (i >= 0) { block[i] = `${key} = ${val}`; return; }
-    let at = block.length;                       // insert before trailing blank lines
-    while (at > 1 && block[at - 1].trim() === "") at--;
-    block.splice(at, 0, `${key} = ${val}`);
-  };
-  setKey("tool_timeout_sec", tool);
-  setKey("startup_timeout_sec", startup);
+${backgroundHint} A consult is one hop — the consulted agent cannot consult back — so you own the synthesis.
 
-  writeFileSync(cfgPath, [...lines.slice(0, header), ...block, ...lines.slice(end)].join("\n"));
-  process.stdout.write(`  timeouts: tool_timeout_sec=${tool}s startup_timeout_sec=${startup}s in ${cfgPath}\n`);
+## Evidence beats framing
+
+Send raw evidence: errors, diffs, failing output, actual constraints — not just your reading of them. Piped stdin rides along as a \`<stdin>\` block. Framing-only prompts make ${Other} inherit your blind spots; the fresh-context advantage works on facts.
+
+## Multi-turn: threads
+
+    gaslamp ${other} --thread api-spar "opening take: ..."
+    gaslamp ${other} --thread api-spar "counterpoint: ..."   # same session, continued
+    gaslamp threads                                          # list named threads
+
+A thread is continue-if-exists-else-start. Prefer threads over raw \`--resume\` for any conversation you might come back to — the name stays valid even as session ids churn.
+
+## Typed replies: --schema
+
+    gaslamp ${other} --json --schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["correct","broken","unsure"]},"reasons":{"type":"array","items":{"type":"string"}}},"required":["verdict","reasons"]}' "Is this fix correct? ..."
+
+The \`--json\` envelope then carries \`data\` (the parsed object). A reply that fails to parse marks the consult failed — trust the exit code. \`--schema\` also takes a file path.
+
+## Fleets: parallel fan-out
+
+    gaslamp fleet ${other} -n 5 "spot the worst bug: ..."    # 5 independent takes; you vote
+    gaslamp fleet ${other} - < tasks.jsonl                   # per line: {"prompt", model?, sandbox?, effort?, schema?, thread?, label?, raw?}
+    gaslamp fleet ${other} -n 4 --stream --json "..."        # JSONL, replies as they land
+    gaslamp fleet --resume <fleet-id>                        # finish an interrupted fleet
+
+Fleets default to \`--sandbox read-only\` (N writers in one cwd race) — pass \`--sandbox\` to opt into writes. Duplicate resume/thread targets are refused up front.
+
+## Picking a model
+
+${other === "codex"
+    ? `Codex tiers, strongest first — pass the full id to \`--model\` (bare tier names are rejected):
+
+| tier | \`--model\` | ≈ claude | reach for it when |
+|------|-----------|----------|-------------------|
+| sol | \`gpt-5.6-sol\` | fable | the hardest reasoning: adversarial verification, design spars, proofs |
+| terra | \`gpt-5.6-terra\` | opus | substantial work: reviews, diagnosis, real implementation |
+| luna | \`gpt-5.6-luna\` | sonnet | quick checks, mechanical transforms, high-N fleets |`
+    : `Claude tiers, strongest first — \`--model\` takes the bare alias:
+
+| \`--model\` | ≈ codex | reach for it when |
+|-----------|---------|-------------------|
+| \`fable\` | sol | the hardest reasoning: adversarial verification, design spars, proofs |
+| \`opus\` | terra | substantial work: reviews, diagnosis, real implementation |
+| \`sonnet\` | luna | quick checks, mechanical transforms, high-N fleets |
+| \`haiku\` | (below luna) | pings, one-word sanity checks, the cheapest fan-outs |`}
+
+Omit \`--model\` to use ${Other}'s own configured default. Match the tier to the stakes: verification you'll rely on deserves the top tier; a fleet vote usually doesn't.
+
+## Reading the records
+
+    gaslamp jobs [--json]                 # recent consults: status, label, thread, tokens
+    gaslamp poll <job|--last> [--json]    # one reply; exit 10 = still running
+    gaslamp tail <job|--last>             # follow a running consult's events live
+
+Every consult writes through to ~/.gaslamp/jobs/<id>/ and its session is recorded within seconds — a killed consult costs the in-flight turn, not the session. Recover with \`--resume <session|job>\` or the thread name.
+
+## Knobs
+
+\`--model\`, \`--effort\`, \`--sandbox\` (omit to use ${Other}'s own config), \`--label\` (tags the job record), \`--raw\` (drop the consult preamble), \`--cwd\`. Exit codes: 0 ok, 1 failed/killed, 2 usage, 3 nested (one-hop), 4 no network, 5 session busy.
+`;
 }
 
-// Quietly remove an existing registration (ignore "not found" noise).
-function remove(cli, name, scopeArgs = []) {
-  spawnSync(cli, ["mcp", "remove", name, ...scopeArgs], { stdio: "ignore" });
+// Install the skill for both agents. Both CLIs read the same SKILL.md format;
+// each side gets the copy pointing at the OTHER backend.
+export function installSkills() {
+  const targets = [
+    { dir: join(homedir(), ".claude", "skills", "gaslamp"), other: "codex" },
+    { dir: join(process.env.CODEX_HOME || join(homedir(), ".codex"), "skills", "gaslamp"), other: "claude" },
+  ];
+  return targets.map(({ dir, other }) => {
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "SKILL.md");
+    writeFileSync(path, skillMd(other));
+    return path;
+  });
 }
 
 export function runSetup(argv = []) {
   const local = argv.includes("--local") || argv.includes("-l");
+  const skill = argv.includes("--skill");
+  if (!which("claude")) console.warn("setup: `claude` not on PATH — `gaslamp claude` consults will fail until it is (or set CLAUDE_BIN).");
+  if (!which("codex")) console.warn("setup: `codex` not on PATH — `gaslamp codex` consults will fail until it is (or set CODEX_BIN).");
 
-  const codex = which("codex");
-  const claude = which("claude");
-  if (!codex) { console.error("setup: `codex` not found on PATH. Install Codex first."); process.exitCode = 1; return; }
-  if (!claude) { console.error("setup: `claude` not found on PATH. Install Claude Code first."); process.exitCode = 1; return; }
-  if (!local && !which("npx")) {
-    console.error("setup: `npx` not found on PATH — the published registration spawns `npx -y gaslamp serve`.");
-    console.error("       Install Node's npm/npx, or use `gaslamp setup --local` to register this checkout instead.");
-    process.exitCode = 1; return;
+  const cmd = local
+    ? resolve(join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "gaslamp.mjs"))
+    : "gaslamp";
+  console.log(`mode: ${local ? `local checkout (${cmd})` : "published (`gaslamp` on PATH)"}\n`);
+
+  const settingsPath = join(homedir(), ".claude", "settings.json");
+  const entry = `Bash(${cmd}:*)`;
+  const next = addAllow(existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : "", entry);
+  if (next == null) {
+    console.warn(`  ! ${settingsPath} is not valid JSON — add ${entry} to permissions.allow yourself`);
+  } else {
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    writeFileSync(settingsPath, next);
+    console.log(`  allowlist: ${entry} → ${settingsPath}`);
   }
 
-  console.log(`codex: ${codex}`);
-  console.log(`claude: ${claude}`);
-  console.log(`mode:  ${local ? "local checkout" : "published (npx)"}\n`);
-
-  // --- Codex -> Claude: codex gets a `gaslamp` tool that hands off to Claude ---
-  remove("codex", "gaslamp");
-  remove("codex", "claude"); // legacy name
-  let serveCmd;
-  if (local) {
-    const node = which("node") || process.execPath;
-    const shim = resolve(join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "gaslamp.mjs"));
-    serveCmd = ["mcp", "add", "gaslamp", "--", node, shim, "serve"];
+  if (skill) {
+    for (const path of installSkills()) console.log(`  skill: ${path}`);
+    console.log("\ndone. both agents now discover gaslamp through the skill; a CLAUDE.md /");
+    console.log("AGENTS.md note is optional on top (the README has the text).");
   } else {
-    // Bare `npx` (not an absolute path) so whatever node is active resolves the
-    // latest published gaslamp at spawn time — survives nvm/node upgrades.
-    serveCmd = ["mcp", "add", "gaslamp", "--", "npx", "-y", "gaslamp", "serve"];
-  }
-  const okCodex = run("codex -> claude", "codex", serveCmd);
-  if (okCodex) patchCodexTimeouts(); // codex mcp add can't persist these; do it ourselves
-
-  // --- Claude -> Codex: claude gets gaslamp's codex tools (user scope) --------
-  // `--env GASLAMP_NESTED=1` tags every Codex spawned as a Claude consult as
-  // nested, so gaslamp's server.mjs refuses if that consulted Codex tries to
-  // hand work back to Claude — a consult is one hop (GASLAMP_ALLOW_RECURSION=1
-  // opts back in). Placement is safe: the server name `gaslamp` precedes --env
-  // and `--` follows it, so the name is never misread as a KEY=VALUE pair.
-  remove("claude", "gaslamp", ["-s", "user"]);
-  remove("claude", "codex", ["-s", "user"]); // legacy name
-  const okClaude = run("claude -> codex", "claude",
-    ["mcp", "add", "gaslamp", "-s", "user", "--env", "GASLAMP_NESTED=1", "--", "codex", "mcp-server"]);
-
-  console.log();
-  if (okCodex && okClaude) {
-    console.log("registered both directions as `gaslamp`.");
-    console.log("→ restart Claude Code so it loads the server.");
-    console.log("  verify:  codex mcp list   and   claude mcp list");
-  } else {
-    console.error("setup: one or both registrations failed (see above).");
-    process.exitCode = 1;
+    console.log("\ndone. one thing left, yours to do: add a short consult note to your");
+    console.log("agent instructions (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md) so each agent");
+    console.log("knows the command exists — see the README for the text to paste. Or run");
+    console.log("`gaslamp setup --skill` to install the gaslamp skill for both agents instead.");
   }
 }
