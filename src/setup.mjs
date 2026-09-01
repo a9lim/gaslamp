@@ -91,20 +91,23 @@ Fleets default to \`--sandbox read-only\` (N writers in one cwd race) — pass \
 
 ## Picking a model
 
+Both ladders, strongest first: fable ≈ astra > opus ≈ sol > terra > sonnet ≈ luna > haiku.
+
 ${other === "codex"
-    ? `Codex tiers, strongest first — pass the full id to \`--model\` (bare tier names are rejected):
+    ? `Codex tiers — pass the full id to \`--model\` (bare tier names are rejected):
 
 | tier | \`--model\` | ≈ claude | reach for it when |
 |------|-----------|----------|-------------------|
-| sol | \`gpt-5.6-sol\` | fable | the hardest reasoning: adversarial verification, design spars, proofs |
-| terra | \`gpt-5.6-terra\` | opus | substantial work: reviews, diagnosis, real implementation |
+| astra | (announced; id not yet published) | fable | the hardest reasoning: adversarial verification, design spars, proofs |
+| sol | \`gpt-5.6-sol\` | opus | substantial work: reviews, diagnosis, real implementation — and the hardest reasoning until astra ships |
+| terra | \`gpt-5.6-terra\` | (between opus and sonnet) | everyday work: routine reviews, well-scoped changes |
 | luna | \`gpt-5.6-luna\` | sonnet | quick checks, mechanical transforms, high-N fleets |`
-    : `Claude tiers, strongest first — \`--model\` takes the bare alias:
+    : `Claude tiers — \`--model\` takes the bare alias:
 
 | \`--model\` | ≈ codex | reach for it when |
 |-----------|---------|-------------------|
-| \`fable\` | sol | the hardest reasoning: adversarial verification, design spars, proofs |
-| \`opus\` | terra | substantial work: reviews, diagnosis, real implementation |
+| \`fable\` | astra | the hardest reasoning: adversarial verification, design spars, proofs |
+| \`opus\` | sol | substantial work: reviews, diagnosis, real implementation |
 | \`sonnet\` | luna | quick checks, mechanical transforms, high-N fleets |
 | \`haiku\` | (below luna) | pings, one-word sanity checks, the cheapest fan-outs |`}
 
