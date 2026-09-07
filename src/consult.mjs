@@ -386,7 +386,11 @@ export function runConsult(backend, argv) {
           costUsd: j.total_cost_usd ?? null,
         };
       } else if (backend === "codex" && j.type === "turn.completed" && j.usage) {
-        usageAcc.input += (j.usage.input_tokens ?? 0) + (j.usage.cached_input_tokens ?? 0);
+        // OpenAI semantics differ from Anthropic's: input_tokens already
+        // INCLUDES the cached portion (cached_input_tokens is a subset, and
+        // codex's own total_tokens = input + output), so adding it again
+        // double-counts cache hits.
+        usageAcc.input += j.usage.input_tokens ?? 0;
         usageAcc.output += j.usage.output_tokens ?? 0;
         meta.usage = { inputTokens: usageAcc.input, outputTokens: usageAcc.output, costUsd: null };
       } else if (backend === "codex" && j.type === "item.completed") {
