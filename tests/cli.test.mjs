@@ -423,9 +423,9 @@ test("usage lands in meta, envelope, and trailer (claude: with cost)", () => {
   assert.match(text.stdout, /tok: 100→200 · \$0\.07/);
 });
 
-test("codex usage sums turn.completed events (no cost channel)", () => {
+test("codex usage sums turn.completed events; cached_input_tokens is a subset, not added", () => {
   const j = JSON.parse(run(["codex", "--json", "p"]).stdout);
-  assert.deepEqual(j.usage, { inputTokens: 60, outputTokens: 20, costUsd: null });
+  assert.deepEqual(j.usage, { inputTokens: 50, outputTokens: 20, costUsd: null });
 });
 
 test("jobs --json lists machine-readable records", () => {

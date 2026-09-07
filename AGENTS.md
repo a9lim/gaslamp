@@ -165,6 +165,17 @@ is papered over inside gaslamp, never exposed to the caller.
   consulted agent could unset the env var. That's fine — its job is to stop
   accidental recursion, and `GASLAMP_ALLOW_RECURSION=1` is a documented
   opt-out anyway.
+- **The sentinel survives Codex's own delegation.** `--effort ultra` (astra,
+  sol, terra; `gpt-6-astra` shipped 2026-09-07) makes Codex spawn subagents
+  of its own. Verified live: a subagent's shell still sees `GASLAMP_NESTED=1`,
+  so the one-hop guard holds one level down without any extra plumbing — the
+  `-c shell_environment_policy.set.…` override is thread config, and the
+  subagents inherit it. Two costs to know about: the delegated work is nearly
+  invisible in the job record (the stream shows only `collab_tool_call`
+  `wait` items with empty receiver ids — the subagent's own commands never
+  appear, so `gaslamp tail` goes dark for the duration), and it is
+  expensive (that trivial probe cost 123k input tokens, ~4× the same ping at
+  `low`).
 - **The sentinel is an env footgun for tests.** Inside a consulted agent,
   `GASLAMP_NESTED=1` is ambient — and anything that spawns gaslamp inherits
   it, including this repo's own test suite, which then fails with nested
@@ -233,9 +244,16 @@ is papered over inside gaslamp, never exposed to the caller.
   and the old `/[\s,]+/` split would shred them (caught by Codex during the
   2.1 spar). The default read set includes read-only git for parity with
   codex's read-only sandbox, which could always run git.
-- **Usage channels differ per backend**: claude's final result event carries
-  `usage` + `total_cost_usd`; codex emits per-turn `turn.completed.usage`
-  events, which gaslamp sums (no cost channel). Both land in `meta.usage`.
+- **Usage channels differ per backend — and so do the cache semantics.**
+  claude's final result event carries `usage` + `total_cost_usd`; codex emits
+  per-turn `turn.completed.usage` events, which gaslamp sums (no cost
+  channel). Both land in `meta.usage` as *what the meter meters*, but the two
+  APIs count differently: Anthropic's `input_tokens` EXCLUDES cache reads and
+  writes (separate fields, so gaslamp adds them), while OpenAI's
+  `input_tokens` already INCLUDES the cached portion (`cached_input_tokens`
+  is a subset; codex's own rollout `total_tokens` = input + output). Adding
+  codex's cached figure on top double-counts every cache hit — 2.1.1 did,
+  overstating a 32k-token ping as 42k (fixed 2026-09-07).
 - **Codex has a native skills dir** (`$CODEX_HOME/skills/`, same SKILL.md
   format as `~/.claude/skills/` — verified against codex 0.142). That's what
   makes `setup --skill` symmetric: one direction-aware skill per side, each
