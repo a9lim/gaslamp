@@ -98,8 +98,8 @@ ${other === "codex"
 
 | tier | \`--model\` | ≈ claude | reach for it when |
 |------|-----------|----------|-------------------|
-| astra | (announced; id not yet published) | fable | the hardest reasoning: adversarial verification, design spars, proofs |
-| sol | \`gpt-5.6-sol\` | opus | substantial work: reviews, diagnosis, real implementation — and the hardest reasoning until astra ships |
+| astra | \`gpt-6-astra\` | fable | the hardest reasoning: adversarial verification, design spars, proofs |
+| sol | \`gpt-5.6-sol\` | opus | substantial work: reviews, diagnosis, real implementation |
 | terra | \`gpt-5.6-terra\` | (between opus and sonnet) | everyday work: routine reviews, well-scoped changes |
 | luna | \`gpt-5.6-luna\` | sonnet | quick checks, mechanical transforms, high-N fleets |`
     : `Claude tiers — \`--model\` takes the bare alias:
@@ -112,6 +112,8 @@ ${other === "codex"
 | \`haiku\` | (below luna) | pings, one-word sanity checks, the cheapest fan-outs |`}
 
 Omit \`--model\` to use ${Other}'s own configured default. Match the tier to the stakes: verification you'll rely on deserves the top tier; a fleet vote usually doesn't.
+
+\`--effort\` takes \`low\` / \`medium\` / \`high\` / \`xhigh\` / \`max\`${other === "codex" ? "; astra, sol and terra also take `ultra` (max reasoning plus automatic task delegation). Omitted = Codex's configured `model_reasoning_effort`, else the model's own default — sol's is `low`, so pass it explicitly when the consult matters." : ". Omitted = Claude's own default."}
 
 ## Reading the records
 
