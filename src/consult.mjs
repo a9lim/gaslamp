@@ -47,6 +47,7 @@ import {
   newJobId, readMeta, renderTrailer, writeMeta,
 } from "./jobs.mjs";
 import { readThread, validThreadName, writeThread } from "./threads.mjs";
+import { readStdin } from "./stdin.mjs";
 
 // Tools permitted under the claude `read-only` override (advisory reviewer).
 // The git reads matter: a reviewer that can't run `git diff`/`git log` is
@@ -81,8 +82,13 @@ const RETRIEVAL_TOOLS = {
   claude: /^(WebSearch|WebFetch)$/,
   codex: /^web_search/,
   gemini: /^(search_web|read_url_content|open_browser_url|read_browser_page|browser_)/,
-  grok: /^(web_search|web_fetch|x_search|x_)/,
+  grok: /^(web_search|web_fetch|x_)/,
 };
+
+// Grok's X search is a backend tool: init never lists it, and a call arrives
+// as a tool_use named "X search:" ({"variant":"XSearch","backend":true}) whose
+// tool_result names the tool that ran (x_keyword_search, x_semantic_search).
+const toolKey = (name) => String(name).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 
 // Variables a third-party harness has no business inheriting from the calling
 // agent: Claude Code's session id, messaging socket token, account and OAuth
@@ -113,7 +119,34 @@ function backendEnv(backend) {
   if (backend === "gemini" || backend === "grok")
     for (const k of Object.keys(env)) if (FOREIGN_ENV.test(k)) delete env[k];
   if (backend === "grok") Object.assign(env, GROK_COMPAT_OFF, { GROK_DISABLE_AUTOUPDATER: "1" });
+  if (backend === "gemini") env.AGY_CLI_DISABLE_AUTO_UPDATE = "true";
   return env;
+}
+
+// Read-only for a gemini consult, on macOS: agy runs under Seatbelt, writing
+// nothing but its own state directory and temp — the guarantee no longer
+// depends on Antigravity's permission settings, which a user may keep lax
+// for interactive work (toolPermission always-proceed, agentMode auto) and
+// which no flag overrides per run. Inside that state directory the files
+// that configure agy stay write-denied (later deny rules win in SBPL).
+// (bin/ stays writable: agy extracts a helper, bin/agentapi, before running
+// any shell command, and denying it breaks read-only commands like git diff.)
+// Elsewhere — Linux, or inside a sandbox of Codex's own, where Seatbelt does
+// not nest — the preset check below is the guarantee.
+const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+const useSeatbelt = () => process.platform === "darwin" && existsSync(SANDBOX_EXEC)
+  && !process.env.CODEX_SANDBOX && process.env.GASLAMP_GEMINI_SEATBELT !== "0";
+function agySeatbeltProfile() {
+  const q = (p) => '"' + p.replace(/[\\"]/g, (c) => "\\" + c) + '"';
+  const state = join(homedir(), ".gemini", "antigravity-cli");
+  return [
+    "(version 1)",
+    "(allow default)",
+    "(deny file-write*)",
+    `(allow file-write* (subpath ${q(state)}) (subpath "/private/tmp") (subpath "/private/var/folders") (subpath "/dev"))`,
+    `(deny file-write* ${["settings.json", "keybindings.json"].map((f) => `(literal ${q(join(state, f))})`).join(" ")} ` +
+      `${["rules", "plugins", "skills", "updater"].map((d) => `(subpath ${q(join(state, d))})`).join(" ")})`,
+  ].join("\n");
 }
 
 // What a read-only gemini consult may find pre-allowed in Antigravity's
@@ -491,12 +524,12 @@ export function runConsult(backend, argv) {
   let prompt = o.prompt;
   if (prompt == null || prompt === "-") {
     if (prompt == null && process.stdin.isTTY) die(2, "no prompt — pass one as an argument or pipe it on stdin");
-    prompt = readFileSync(0, "utf8");
+    prompt = readStdin();
   } else if (!process.stdin.isTTY) {
     // Prompt on argv AND piped stdin: stdin is evidence — the diff, the log,
     // the failing output — appended as a <stdin> block. This is codex exec's
     // own convention for exactly this case, applied uniformly to both backends.
-    const evidence = readFileSync(0, "utf8");
+    const evidence = readStdin();
     if (evidence.trim())
       prompt += "\n\n<stdin>\n" + (evidence.endsWith("\n") ? evidence : evidence + "\n") + "</stdin>";
   }
@@ -522,19 +555,28 @@ export function runConsult(backend, argv) {
   // must not strand either.
   const bin = resolveBin(backend);
   const env = backendEnv(backend);
-  let grants = null;
+  let grants = null, agySettings = null, wrap = null;
+  let enforcement = sandbox === "read-only" ? {
+    claude: "permission-mode default + read allowlist", codex: "codex read-only sandbox",
+    grok: "grok --sandbox read-only (kernel)", gemini: null,
+  }[backend] : null;
   if (backend === "gemini" && sandbox === "read-only") {
     const state = agyPermissionState();
+    grants = state.grants.map((g) => g.rule);
+    agySettings = [...state.presets.map((p) => `toolPermission ${p.preset}`), ...state.modes.map((m) => `agentMode ${m.mode}`)];
     const lax = state.presets.filter((p) => AGY_LAX_PRESETS.has(p.preset));
     const modes = state.modes.filter((m) => AGY_LAX_MODES.has(m.mode));
     const open = state.grants.filter((g) => !AGY_READ_GRANT.test(g.rule));
-    if (lax.length || modes.length || open.length)
+    if (useSeatbelt()) {
+      wrap = [SANDBOX_EXEC, "-p", agySeatbeltProfile()];
+      enforcement = "seatbelt (sandbox-exec)";
+    } else if (lax.length || modes.length || open.length)
       die(1, "Antigravity's settings would let a read-only consult act unprompted — " +
         [...lax.map((p) => `toolPermission "${p.preset}" (${p.file})`),
           ...modes.map((m) => `agentMode "${m.mode}" (${m.file})`),
           ...open.map((g) => `${g.rule} (${g.file})`)].join(", ") +
         ". Remove them, or pass --sandbox danger-full-access to consult without the guarantee.");
-    grants = state.grants.map((g) => g.rule);
+    else enforcement = "agy request-review preset";
   }
   const model = resolveModel(backend, o.model, bin, env);
   const version = harnessVersion(bin, env);
@@ -558,8 +600,8 @@ export function runConsult(backend, argv) {
       // `model` is what the backend reported answering with; unknown until it
       // does (codex never reports one in its event stream).
       model: "unknown", modelRequested: o.model ?? null, modelPassed: model,
-      permissionMode: null, sandbox,
-      ...(grants ? { grants } : {}),
+      permissionMode: null, sandbox, enforcement,
+      ...(grants ? { grants, agySettings } : {}),
       systemPrompt: { known: false },
       retrieval: { available: null, used: [] },
       gaslamp: { version: PKG_VERSION, revision: gaslampRevision() },
@@ -584,10 +626,13 @@ export function runConsult(backend, argv) {
     : backend === "gemini" ? geminiArgs(o, resumeSid, schemaText, model, sandbox)
     : grokArgs(o, resumeSid, schemaText, sandbox);
 
-  log("spawn", bin, JSON.stringify(args));
+  // sandbox-exec applies the profile and execs the harness in place (same
+  // pid), so the group, the signals and the process name are agy's own.
+  const [cmd, argv0] = wrap ? [wrap[0], [...wrap.slice(1), bin, ...args]] : [bin, args];
+  log("spawn", cmd, JSON.stringify(argv0));
   // detached → the child leads its own process group, so signal forwarding can
   // kill the whole tree (backend + whatever it spawned), never just the top.
-  const child = spawn(bin, args, { cwd: meta.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+  const child = spawn(cmd, argv0, { cwd: meta.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
   meta.childPid = child.pid ?? null;
   writeMeta(meta);
   const killGroup = (sig) => {
@@ -680,11 +725,19 @@ export function runConsult(backend, argv) {
       if (j.model) prov.model = j.model;
       prov.permissionMode = j.permissionMode ?? null;
       if (Array.isArray(j.tools)) prov.retrieval.available = j.tools.filter((t) => RETRIEVAL_TOOLS[backend].test(t));
+      // Grok's backend X search is never listed but is there (see toolKey).
+      if (backend === "grok" && prov.retrieval.available) prov.retrieval.available.push("x_search");
       writeMeta(meta);
     } else if (claudeShaped && j.type === "assistant") {
       for (const c of j.message?.content ?? []) {
-        if (c.type === "tool_use" || c.type === "server_tool_use") noteTool(c.name);
+        if (c.type === "tool_use" || c.type === "server_tool_use") noteTool(toolKey(c.name));
         if (c.type === "tool_use" && c.name === "use_tool") noteTool(c.input?.tool_name);
+      }
+    } else if (backend === "grok" && j.type === "user") {
+      for (const c of j.message?.content ?? []) {
+        if (c.type !== "tool_result" || typeof c.content !== "string") continue;
+        let r; try { r = JSON.parse(c.content); } catch { continue; }
+        if (typeof r?.name === "string") noteTool(r.name);
       }
     } else if (backend === "gemini" && j.event === "init") {
       initSeen = true;
@@ -695,9 +748,9 @@ export function runConsult(backend, argv) {
       if (Array.isArray(init.tools)) prov.retrieval.available = [...new Set(init.tools
         .filter((t) => RETRIEVAL_TOOLS.gemini.test(t)).map((t) => t.startsWith("browser_") ? "browser_*" : t))];
       writeMeta(meta);
-      // Read-only rests on Antigravity's request-review (or strict) preset;
-      // a laxer one would let the consult act unprompted.
-      if (sandbox === "read-only" && !["request-review", "strict"].includes(prov.permissionMode))
+      // Without Seatbelt, read-only rests on Antigravity's request-review (or
+      // strict) preset; a laxer one would let the consult act unprompted.
+      if (sandbox === "read-only" && !wrap && !["request-review", "strict"].includes(prov.permissionMode))
         refuse(`agy reports permission mode "${prov.permissionMode}", not request-review — refusing a read-only consult it would not enforce`);
       else initValidated = true;
     } else if (backend === "gemini" && j.event === "step_update") {
@@ -816,7 +869,7 @@ export function runConsult(backend, argv) {
       : structuredOut !== undefined ? JSON.stringify(structuredOut) : resultText;
 
     let status = killedBy ? "killed" : (refusal || code !== 0 || resultErr) ? "failed" : "done";
-    if (status === "done" && backend === "gemini" && sandbox === "read-only" && !initValidated) {
+    if (status === "done" && backend === "gemini" && sandbox === "read-only" && !wrap && !initValidated) {
       status = "failed";
       refusal = "agy reported no init event, so its permission mode — the read-only guarantee — went unconfirmed";
       writeSync(2, `[gaslamp] ${refusal}\n`);

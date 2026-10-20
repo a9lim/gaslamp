@@ -288,15 +288,18 @@ threads, `--schema`, fleets — with these differences:
   kernel sandbox (`--sandbox read-only`: Seatbelt on macOS, Landlock on Linux;
   writes only to `~/.grok` and temp dirs). Grok's permission layer is not a
   substitute: headless `--permission-mode default` denied its write tool but
-  ran an arbitrary shell `touch`. Antigravity's print mode soft-denies file
-  writes, shell commands and URL fetches under its default `request-review`
-  preset; standing allow rules in its permission files would run
-  unprompted, so a read-only consult refuses to start when they grant more
-  than reads, read-only git and the end_session off-ramp, or set a lax
-  `toolPermission` or `agentMode: auto` (which approves writes and commands
-  under any preset, unreported), and fails if the
-  harness doesn't confirm the preset in its init event. Like claude's
-  read-only, that is read-capable rather than airtight: an allowed
+  ran an arbitrary shell `touch`. On macOS, a read-only gemini consult runs
+  agy under Seatbelt (`sandbox-exec`): it can write its own state directory
+  (`~/.gemini/antigravity-cli`, minus the files that configure it) and temp
+  dirs, nothing else, whatever Antigravity's permission settings say — so a
+  user can keep `always-proceed` / `agentMode: auto` for interactive work, and
+  search and read-only commands still run. Elsewhere (Linux, or inside a
+  Codex sandbox, where Seatbelt does not nest) the guarantee is Antigravity's
+  `request-review` preset: the consult refuses to start when its permission
+  files grant more than reads, read-only git and the end_session off-ramp, or
+  set a lax `toolPermission` or `agentMode: auto` (which approves writes and
+  commands under any preset, unreported), and fails if init doesn't confirm
+  the preset. That path is read-capable rather than airtight: an allowed
   `git diff` still accepts git's own `--output=<file>`.
   Antigravity has no headless `workspace-write` (`--mode accept-edits` did
   not enable writes in print mode), so that is a usage error there.
@@ -337,6 +340,7 @@ it. This is loop prevention, not a security boundary. Set
 | `GASLAMP_DEBUG` | unset | verbose stderr (spawn argv) |
 | `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN` / `GROK_BIN` | autodetected | backend binaries |
 | `GROK_HOME` | `~/.grok` | where grok keeps sessions (the system prompt hash is read from there) |
+| `GASLAMP_GEMINI_SEATBELT` | on (macOS) | `0` runs read-only gemini consults on Antigravity's preset check instead of Seatbelt |
 | `CODEX_HOME` | `~/.codex` | where `setup --skill` puts Codex's copy |
 
 Exit codes: `0` ok · `1` consult failed/killed · `2` usage · `3` nested
