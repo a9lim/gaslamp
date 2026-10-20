@@ -1,6 +1,6 @@
 {
   "name": "gaslamp",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "Let Claude Code and Codex consult each other from the shell, and consult Gemini and Grok.",
   "type": "module",
   "bin": {
