@@ -19,6 +19,7 @@ const PKG = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
 // Mimics `claude -p --output-format stream-json --verbose` with the prompt on
 // stdin: an init event (session id, early), then a result event.
 const CLAUDE_STUB = `#!/usr/bin/env node
+if (process.argv[2] === "--version") { console.log("9.9.9 (Claude Code stub)"); process.exit(0); }
 let prompt = "";
 process.stdin.on("data", (d) => (prompt += d));
 process.stdin.on("end", () => setTimeout(() => {
@@ -42,6 +43,7 @@ process.stdin.on("end", () => setTimeout(() => {
 // event (id channel), an agent_message item, and the final text via -o.
 const CODEX_STUB = `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
+if (process.argv[2] === "--version") { console.log("codex-cli 9.9.9"); process.exit(0); }
 let prompt = "";
 process.stdin.on("data", (d) => (prompt += d));
 process.stdin.on("end", () => setTimeout(() => {
@@ -51,6 +53,8 @@ process.stdin.on("end", () => setTimeout(() => {
   const out = argv[argv.indexOf("-o") + 1];
   const tid = argv[1] === "resume" ? argv[2] : "cx-thread-1";
   process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: tid }) + "\\n");
+  if (prompt.includes("search"))
+    process.stdout.write(JSON.stringify({ type: "item.started", item: { id: "ws", type: "web_search", query: "q" } }) + "\\n");
   // Consume the <gaslamp_consult> preamble block the way a real backend would,
   // reporting it as a marker so tests can assert its presence/absence.
   const pre = prompt.startsWith("<gaslamp_consult>\\n");
@@ -65,17 +69,136 @@ process.stdin.on("end", () => setTimeout(() => {
 }, Number(process.env.STUB_DELAY_MS || 0)));
 `;
 
-let dir, home, claudeStub, codexStub;
+// Mimics `agy --input-format stream-json --output-format stream-json …` (1.4.3):
+// one {"event":"user"} line on stdin; init (conversation id, model,
+// permission_mode, tools), step updates, a result. `agy models` lists one slug
+// per effort level. STUB_AUTH_HANG reproduces print mode without a sign-in:
+// a URL on stdout, then waiting forever.
+const AGY_STUB = `#!/usr/bin/env node
+const argv = process.argv.slice(2);
+if (argv[0] === "--version") { console.log("9.9.9"); process.exit(0); }
+if (argv[0] === "models") {
+  if (process.env.STUB_MODELS_FAIL) { console.error("network down"); process.exit(1); }
+  console.log("Fetching available models...");
+  for (const m of ["gemini-4-argon-medium", "gemini-4-argon-high", "gemini-3.8-argon-low",
+    "gemini-3.8-flash-medium", "claude-opus-5-5-high"]) console.log(m + "\\tStub " + m);
+  process.exit(0);
+}
+if (process.env.STUB_STUBBORN_CHILD) {
+  // a descendant that ignores SIGTERM and closes the pipes it inherited
+  const { spawn } = await import("node:child_process");
+  const { writeFileSync } = await import("node:fs");
+  const c = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  writeFileSync(process.env.STUB_STUBBORN_CHILD, String(c.pid));
+}
+if (process.env.STUB_AUTH_HANG === "unterminated") {
+  // a prompt that never ends its line
+  process.stdout.write("Authentication required. Paste the code: ");
+  setInterval(() => {}, 1000);
+} else if (process.env.STUB_AUTH_HANG) {
+  // the sign-in notice, split mid-word across writes the way a pipe may deliver it
+  process.stdout.write("Authentication requ");
+  setTimeout(() => process.stdout.write("ired. Please visit the URL to log in:\\n  https://accounts.google.com/o/oauth2/auth?stub\\n"), 150);
+  setInterval(() => {}, 1000);
+} else {
+  let input = "";
+  process.stdin.on("data", (d) => (input += d));
+  process.stdin.on("end", () => setTimeout(() => {
+    let content = JSON.parse(input.trim().split("\\n")[0]).message.content;
+    const pre = content.startsWith("<gaslamp_consult>\\n");
+    if (pre) content = content.replace(/^<gaslamp_consult>\\n[\\s\\S]*?\\n<\\/gaslamp_consult>\\n\\n/, "");
+    const at = (f) => argv.includes(f) ? argv[argv.indexOf(f) + 1] : null;
+    const cid = at("--conversation") ?? "gm-conv-1";
+    const emit = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+    const mode = process.env.STUB_PERMISSION_MODE
+      || (argv.includes("--dangerously-skip-permissions") ? "always-proceed" : "request-review");
+    if (!process.env.STUB_NO_INIT)
+      emit({ event: "init", conversation_id: cid, init: { model: at("--model"), cwd: process.cwd(), permission_mode: mode,
+        tools: ["view_file", "search_web", "read_url_content", "browser_click_element", "browser_scroll"] } });
+    if (content.includes("search"))
+      emit({ event: "step_update", step_update: { conversation_id: cid, step_index: 1, state: "DONE", step_type: "tool",
+        tool_name: "search_web", tool_info: { name: "search_web", parameters: { query: "q" } } } });
+    emit({ event: "step_update", step_update: { conversation_id: cid, step_index: 2, state: "DONE", step_type: "agent_response",
+      usage: { input_tokens: 700, output_tokens: 30, thinking_tokens: 5, cache_read_tokens: 100, total_tokens: 730 } } });
+    if (process.env.STUB_EMPTY) process.stderr.write("jetski: no output produced — a tool required the write_file permission\\n");
+    const result = { conversation_id: cid, status: "SUCCESS", num_turns: 1,
+      // cumulative over the conversation: gaslamp must not take this as the job's usage
+      usage: { input_tokens: 99999, output_tokens: 9999 },
+      response: process.env.STUB_EMPTY ? "" : "stub gemini: " + content + " || argv: " + JSON.stringify(argv) +
+        " || preamble=" + pre + " || nested=" + (process.env.GASLAMP_NESTED || "") +
+        " || claudeSid=" + ("CLAUDE_CODE_SESSION_ID" in process.env) };
+    if (argv.includes("--json-schema") && !process.env.STUB_BAD_JSON) {
+      result.response = JSON.stringify({ ok: true, who: "gemini" });
+      result.structured_output = { ok: true, who: "gemini" };
+    }
+    emit({ event: "result", result });
+  }, Number(process.env.STUB_DELAY_MS || 0)));
+}
+`;
+
+// Mimics `grok --prompt-file /dev/stdin --output-format streaming-messages-json …`
+// (1.0.62): Anthropic stream-json shape — system init (session id, model,
+// permissionMode, tools), assistant messages, a result carrying modelUsage
+// (the billed model) — and the session's system_prompt.txt on disk.
+const GROK_STUB = `#!/usr/bin/env node
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const argv = process.argv.slice(2);
+if (argv[0] === "--version") { console.log("grok 9.9.9 (stub) [stable]"); process.exit(0); }
+const at = (f) => argv.includes(f) ? argv[argv.indexOf(f) + 1] : null;
+let prompt = "";
+process.stdin.on("data", (d) => (prompt += d));
+process.stdin.on("end", () => setTimeout(() => {
+  const sid = at("--resume") ?? "gk-sess-1";
+  const dir = join(process.env.GROK_HOME, "sessions", encodeURIComponent(process.cwd()), sid);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "system_prompt.txt"), "stub system prompt" + (at("--rules") ? "\\n" + at("--rules") : ""));
+  const emit = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
+  emit({ type: "system", subtype: "init", session_id: sid, model: at("-m") ?? "grok-4.7",
+    permissionMode: at("--permission-mode") ?? (argv.includes("--always-approve") ? "bypassPermissions" : "default"),
+    tools: ["read_file", "web_search", "web_fetch", "run_terminal_command"], mcp_servers: [] });
+  if (prompt.includes("search"))
+    emit({ type: "assistant", session_id: sid, message: { content: [{ type: "tool_use", name: "web_search", input: { query: "q" } }] } });
+  const flags = ["GROK_CLAUDE_AGENTS_ENABLED", "GROK_CLAUDE_HOOKS_ENABLED", "GROK_CURSOR_MCPS_ENABLED"]
+    .map((k) => k + "=" + process.env[k]).join(",");
+  const result = { type: "result", subtype: "success", is_error: false, session_id: sid,
+    result: process.env.STUB_EMPTY ? "" : "stub grok: " + prompt + " || argv: " + JSON.stringify(argv) +
+      " || env: " + flags + " || claudeSid=" + ("CLAUDE_CODE_SESSION_ID" in process.env) +
+      " || nested=" + (process.env.GASLAMP_NESTED || ""),
+    usage: { input_tokens: 100, cache_read_input_tokens: 900, cache_creation_input_tokens: 0, output_tokens: 50 },
+    modelUsage: { "grok-4.7-build": { inputTokens: 100, outputTokens: 50 } }, total_cost_usd: 0.04 };
+  if (argv.includes("--json-schema") && !process.env.STUB_BAD_JSON) {
+    result.result = process.env.STUB_STRUCTURED_ONLY ? "" : JSON.stringify({ ok: true, who: "grok" });
+    result.structured_output = { ok: true, who: "grok" };
+  }
+  emit(result);
+}, Number(process.env.STUB_DELAY_MS || 0)));
+`;
+
+// Codex's own live model catalog, as tier resolution reads it.
+const CODEX_MODELS = { models: [
+  { slug: "gpt-6.1-sol", visibility: "list" }, { slug: "gpt-6-sol", visibility: "list" },
+  { slug: "gpt-6-astra", visibility: "list" }, { slug: "gpt-6-luna", visibility: "list" },
+  { slug: "gpt-7-luna", visibility: "hide" }, { slug: "gpt-5.6-luna", visibility: "list" },
+] };
+
+let dir, home, claudeStub, codexStub, agyStub, grokStub;
 
 before(() => {
   dir = mkdtempSync(join(tmpdir(), "gaslamp-test-"));
   home = join(dir, "gaslamp-home");
   claudeStub = join(dir, "claude-stub.mjs");
   codexStub = join(dir, "codex-stub.mjs");
+  agyStub = join(dir, "agy-stub.mjs");
+  grokStub = join(dir, "grok-stub.mjs");
   writeFileSync(claudeStub, CLAUDE_STUB);
   writeFileSync(codexStub, CODEX_STUB);
-  chmodSync(claudeStub, 0o755);
-  chmodSync(codexStub, 0o755);
+  writeFileSync(agyStub, AGY_STUB);
+  writeFileSync(grokStub, GROK_STUB);
+  for (const s of [claudeStub, codexStub, agyStub, grokStub]) chmodSync(s, 0o755);
+  mkdirSync(join(dir, "codex-home"), { recursive: true });
+  mkdirSync(join(dir, "home"), { recursive: true });
+  writeFileSync(join(dir, "codex-home", "models_cache.json"), JSON.stringify(CODEX_MODELS));
 });
 
 after(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
@@ -86,14 +209,17 @@ function env(extra = {}) {
   const e = { ...process.env };
   for (const k of ["GASLAMP_NESTED", "GASLAMP_ALLOW_RECURSION", "GASLAMP_FLEET", "CODEX_SANDBOX_NETWORK_DISABLED",
     "GASLAMP_DEBUG", "GASLAMP_ALLOWED_TOOLS", "ANTHROPIC_API_KEY", "STUB_DELAY_MS", "STUB_BAD_JSON",
-    "STUB_FAIL_SUBSTR"]) delete e[k];
-  return { ...e, CLAUDE_BIN: claudeStub, CODEX_BIN: codexStub, GASLAMP_HOME: home, ...extra };
+    "STUB_FAIL_SUBSTR", "STUB_EMPTY", "STUB_AUTH_HANG", "STUB_PERMISSION_MODE", "CLAUDE_CODE_SESSION_ID",
+    "STUB_NO_INIT", "STUB_MODELS_FAIL", "STUB_STUBBORN_CHILD", "STUB_STRUCTURED_ONLY"]) delete e[k];
+  return { ...e, CLAUDE_BIN: claudeStub, CODEX_BIN: codexStub, AGY_BIN: agyStub, GROK_BIN: grokStub,
+    GASLAMP_HOME: home, GROK_HOME: join(dir, "grok-home"), CODEX_HOME: join(dir, "codex-home"),
+    HOME: join(dir, "home"), ...extra };
 }
 
 const run = (args, opts = {}) =>
   spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8", ...opts, env: env(opts.env) });
 
-const jobIdFrom = (out) => out.match(/job: (c[lx]-\d{8}-\d{6}-[0-9a-f]{4})/)?.[1];
+const jobIdFrom = (out) => out.match(/job: ((?:cl|cx|gm|gk)-\d{8}-\d{6}-[0-9a-f]{4})/)?.[1];
 const meta = (id) => JSON.parse(readFileSync(join(home, "jobs", id, "meta.json"), "utf8"));
 const fleetIdFrom = (s) => s.match(/fleet (fl-\d{8}-\d{6}-[0-9a-f]{4})/)?.[1];
 
@@ -786,4 +912,287 @@ test("poll <fleet-id> regroups children, deriving status from their records", ()
   assert.equal(p.status, 0, p.stderr);
   assert.equal((p.stdout.match(/stub claude: grouped/g) || []).length, 2);
   assert.match(p.stdout, new RegExp(`${fleetId} · claude · 2/2 done`));
+});
+
+// ---- gemini (Antigravity CLI) and grok (Grok Build) ------------------------------
+
+const replyOf = (out) => out.split("\n[gaslamp]")[0];
+
+test("gemini consult round-trips over agy's streaming input, read-only, provenance recorded", () => {
+  const r = run(["gemini", "hello gemini"]);
+  assert.equal(r.status, 0, r.stderr);
+  const id = jobIdFrom(r.stdout);
+  assert.match(id, /^gm-/);
+  assert.match(r.stdout, /stub gemini: hello gemini/);
+  // prompt rides stdin as one user event; the preamble is in-prompt, like codex
+  assert.match(r.stdout, /preamble=true/);
+  assert.match(r.stdout, /"--input-format","stream-json","--output-format","stream-json"/);
+  // no --model given: the argon tier, resolved against `agy models` (newest version)
+  assert.match(r.stdout, /"--model","gemini-4-argon"/);
+  assert.doesNotMatch(r.stdout, /dangerously-skip-permissions/);
+  assert.match(r.stdout, /session: gm-conv-1 · resume: gaslamp gemini --resume gm-conv-1 · model: gemini-4-argon/);
+  const m = meta(id);
+  assert.equal(m.status, "done");
+  assert.equal(m.sandbox, "read-only");
+  assert.equal(m.model, "gemini-4-argon");
+  // usage is the sum of this job's steps, not the conversation-cumulative result
+  // (agy's input_tokens excludes cache reads, so both count)
+  assert.deepEqual(m.usage, { inputTokens: 800, outputTokens: 30, costUsd: null });
+  const p = m.provenance;
+  assert.equal(p.provider, "google");
+  assert.equal(p.harness, "agy");
+  assert.equal(p.harnessVersion, "9.9.9");
+  assert.equal(p.model, "gemini-4-argon");
+  assert.equal(p.modelRequested, null);
+  assert.equal(p.permissionMode, "request-review");
+  assert.deepEqual(p.systemPrompt, { known: false });
+  assert.deepEqual(p.retrieval, { available: ["search_web", "read_url_content", "browser_*"], used: [] });
+  assert.equal(p.gaslamp.version, PKG.version);
+  assert.match(p.gaslamp.revision, /^([0-9a-f]{12}(\+dirty)?|unknown)$/);
+});
+
+test("grok consult round-trips: kernel read-only sandbox, preamble as --rules, billed model, system prompt hashed", () => {
+  const r = run(["grok", "hello grok"]);
+  assert.equal(r.status, 0, r.stderr);
+  const id = jobIdFrom(r.stdout);
+  assert.match(id, /^gk-/);
+  assert.match(r.stdout, /stub grok: hello grok/);
+  assert.match(r.stdout, /"--prompt-file","\/dev\/stdin","--output-format","streaming-messages-json","--no-auto-update"/);
+  assert.match(r.stdout, /"--rules","You are being consulted/);
+  assert.match(r.stdout, /"--sandbox","read-only","--permission-mode","default"/);
+  assert.match(r.stdout, /model: grok-4\.7 \(billed grok-4\.7-build\) · tok: 1\.0k→50 · \$0\.04/);
+  const p = meta(id).provenance;
+  assert.equal(p.provider, "xai");
+  assert.equal(p.harnessVersion, "grok 9.9.9 (stub) [stable]");
+  assert.deepEqual(p.billedModels, ["grok-4.7-build"]);
+  assert.equal(p.permissionMode, "default");
+  assert.equal(p.systemPrompt.known, true);
+  assert.match(p.systemPrompt.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(p.retrieval, { available: ["web_search", "web_fetch"], used: [] });
+});
+
+test("gemini and grok spawns drop the caller's harness env; grok's vendor-compat imports are off", () => {
+  const extra = { env: { CLAUDE_CODE_SESSION_ID: "the-callers-session" } };
+  const g = run(["gemini", "p"], extra);
+  assert.match(g.stdout, /claudeSid=false/);
+  assert.match(g.stdout, /nested=1/);
+  const k = run(["grok", "p"], extra);
+  assert.match(k.stdout, /claudeSid=false/);
+  assert.match(k.stdout, /env: GROK_CLAUDE_AGENTS_ENABLED=0,GROK_CLAUDE_HOOKS_ENABLED=0,GROK_CURSOR_MCPS_ENABLED=0/);
+  // claude and codex consults are unchanged: the caller's env passes through
+  assert.match(run(["claude", "p"], extra).stdout, /stub claude: p/);
+});
+
+test("--sandbox maps honestly for the newcomers", () => {
+  const gw = run(["gemini", "--sandbox", "workspace-write", "p"]);
+  assert.equal(gw.status, 2);
+  assert.match(gw.stderr, /no honest workspace-write/);
+  assert.match(run(["gemini", "--sandbox", "danger-full-access", "p"]).stdout, /"--dangerously-skip-permissions"/);
+  assert.match(run(["grok", "--sandbox", "workspace-write", "p"]).stdout,
+    /"--sandbox","workspace","--permission-mode","acceptEdits"/);
+  assert.match(run(["grok", "--sandbox", "danger-full-access", "p"]).stdout, /"--sandbox","off","--always-approve"/);
+});
+
+test("a read-only gemini consult refuses a harness reporting a laxer permission mode", () => {
+  const r = run(["gemini", "p"], { env: { STUB_PERMISSION_MODE: "always-proceed", STUB_DELAY_MS: "3000" } });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /permission mode "always-proceed", not request-review/);
+  const m = meta(jobIdFrom(r.stdout));
+  assert.equal(m.status, "failed");
+  assert.match(m.refusal, /always-proceed/);
+});
+
+test("an empty reply is a failed consult on both newcomers, with the reason surfaced", () => {
+  const g = run(["gemini", "p"], { env: { STUB_EMPTY: "1" } });
+  assert.equal(g.status, 1);
+  assert.match(g.stderr, /empty reply/);
+  assert.match(g.stderr, /no output produced/);
+  assert.equal(meta(jobIdFrom(g.stdout)).status, "failed");
+  const k = run(["grok", "p"], { env: { STUB_EMPTY: "1" } });
+  assert.equal(k.status, 1);
+  assert.equal(meta(jobIdFrom(k.stdout)).status, "failed");
+});
+
+test("agy waiting on a sign-in is stopped, not left hanging", () => {
+  const t0 = Date.now();
+  const pidFile = join(dir, "stubborn.pid");
+  const r = run(["gemini", "p"], { env: { STUB_AUTH_HANG: "1", STUB_STUBBORN_CHILD: pidFile } });
+  assert.equal(r.status, 1);
+  assert.ok(Date.now() - t0 < 8000, "refused promptly");
+  // the whole group went down, including a descendant that ignored SIGTERM
+  const stubborn = Number(readFileSync(pidFile, "utf8"));
+  assert.throws(() => process.kill(stubborn, 0), /ESRCH/);
+  assert.match(r.stderr, /agy is not signed in/);
+  assert.match(meta(jobIdFrom(r.stdout)).refusal, /not signed in/);
+});
+
+test("retrieval the consultee actually used lands in provenance", () => {
+  const g = run(["gemini", "please search for it"]);
+  assert.deepEqual(meta(jobIdFrom(g.stdout)).provenance.retrieval.used, ["search_web"]);
+  const k = run(["grok", "please search for it"]);
+  assert.deepEqual(meta(jobIdFrom(k.stdout)).provenance.retrieval.used, ["web_search"]);
+});
+
+test("tier words resolve against the harness's own catalog; exact ids and unknown words pass through", () => {
+  assert.match(run(["codex", "--model", "sol", "p"]).stdout, /"-m","gpt-6\.1-sol"/);
+  // a hidden newer slug is not a candidate
+  const luna = run(["codex", "--model", "luna", "p"]);
+  assert.match(luna.stdout, /"-m","gpt-6-luna"/);
+  const p = meta(jobIdFrom(luna.stdout)).provenance;
+  assert.equal(p.modelRequested, "luna");
+  assert.equal(p.modelPassed, "gpt-6-luna");
+  assert.match(run(["codex", "--model", "nova", "p"]).stdout, /"-m","nova"/);
+  assert.match(run(["gemini", "--model", "flash", "p"]).stdout, /"--model","gemini-3\.8-flash"/);
+  assert.match(run(["gemini", "--model", "gemini-3.8-argon", "p"]).stdout, /"--model","gemini-3\.8-argon"/);
+  // claude resolves its own aliases
+  assert.match(run(["claude", "--model", "sonnet", "p"]).stdout, /"--model","sonnet"/);
+});
+
+test("newcomer resume, effort, and --raw map to each harness's flags", () => {
+  const g = run(["gemini", "--resume", "conv-9", "--effort", "high", "p"]);
+  assert.match(g.stdout, /"--effort","high","--conversation","conv-9"/);
+  assert.match(g.stdout, /session: conv-9/);
+  const k = run(["grok", "--resume", "gk-sess-9", "--effort", "high", "--raw", "p"]);
+  assert.match(k.stdout, /"--resume","gk-sess-9"/);
+  assert.match(k.stdout, /"--effort","high"/);
+  assert.doesNotMatch(k.stdout, /--rules/);
+  assert.match(run(["gemini", "--raw", "p"]).stdout, /preamble=false/);
+  // a grok job id resumes its session
+  const first = run(["grok", "p"]);
+  const again = run(["grok", "--resume", jobIdFrom(first.stdout), "p2"]);
+  assert.match(again.stdout, /"--resume","gk-sess-1"/);
+});
+
+test("--schema reaches both newcomers natively; data flows back", () => {
+  for (const b of ["gemini", "grok"]) {
+    const r = run([b, "--json", "--schema", '{"type":"object","properties":{"ok":{"type":"boolean"}}}', "p"]);
+    assert.equal(r.status, 0, r.stderr);
+    const env = JSON.parse(r.stdout);
+    assert.equal(env.backend, b);
+    assert.deepEqual(env.data, { ok: true, who: b });
+  }
+});
+
+test("fleets fan out over the newcomers; tail renders their events", () => {
+  const f = run(["fleet", "gemini", "-n", "2", "--json", "name a color"]);
+  assert.equal(f.status, 0, f.stderr);
+  const j = JSON.parse(f.stdout);
+  assert.equal(j.backend, "gemini");
+  assert.equal(j.counts.done, 2);
+  for (const x of j.results) { assert.match(x.jobId, /^gm-/); assert.match(x.content, /stub gemini: name a color/); }
+  const g = run(["gemini", "please search"]);
+  const tg = run(["tail", jobIdFrom(g.stdout)]);
+  assert.match(tg.stdout, /init · conversation gm-conv- · gemini-4-argon/);
+  assert.match(tg.stdout, /tool → search_web/);
+  assert.match(tg.stdout, /result · SUCCESS/);
+  const k = run(["grok", "please search"]);
+  const tk = run(["tail", jobIdFrom(k.stdout)]);
+  assert.match(tk.stdout, /init · session gk-sess- · grok-4\.7/);
+  assert.match(tk.stdout, /tool → web_search/);
+});
+
+// ---- review findings (Codex, 2026-10-20) ------------------------------------
+
+const agySettings = (obj) => {
+  const d = join(dir, "home", ".gemini", "antigravity-cli");
+  mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, "settings.json"), JSON.stringify(obj));
+};
+
+test("a read-only gemini consult refuses settings that would let it act unprompted", () => {
+  try {
+    agySettings({ permissions: { allow: ["command(git diff)", "mcp(end-conversation/*)", "read_file(/var/log)"] } });
+    const ok = run(["gemini", "p"]);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.deepEqual(meta(jobIdFrom(ok.stdout)).provenance.grants,
+      ["command(git diff)", "mcp(end-conversation/*)", "read_file(/var/log)"]);
+
+    agySettings({ permissions: { allow: ["command(git diff)", "write_file(src/)"] } });
+    const w = run(["gemini", "p"]);
+    assert.equal(w.status, 1);
+    assert.match(w.stderr, /write_file\(src\/\)/);
+    assert.doesNotMatch(w.stdout, /stub gemini/, "never spawned");
+
+    agySettings({ toolPermission: "always-proceed" });
+    assert.match(run(["gemini", "p"]).stderr, /toolPermission "always-proceed"/);
+
+    // the escape hatch is explicit
+    assert.equal(run(["gemini", "--sandbox", "danger-full-access", "p"]).status, 0);
+  } finally {
+    agySettings({});
+  }
+});
+
+test("a read-only gemini consult without a confirming init event fails", () => {
+  const r = run(["gemini", "p"], { env: { STUB_NO_INIT: "1" } });
+  assert.equal(r.status, 1);
+  const m = meta(jobIdFrom(r.stdout));
+  assert.equal(m.status, "failed");
+  assert.match(m.refusal, /no init event/);
+});
+
+test("an unterminated sign-in prompt is caught too", () => {
+  const t0 = Date.now();
+  const r = run(["gemini", "p"], { env: { STUB_AUTH_HANG: "unterminated" } });
+  assert.equal(r.status, 1);
+  assert.ok(Date.now() - t0 < 8000, "refused promptly");
+  assert.match(r.stderr, /agy is not signed in/);
+});
+
+test("grants in the app-shared and per-project permission files count too", () => {
+  const cfg = join(dir, "home", ".gemini", "config");
+  mkdirSync(join(cfg, "projects"), { recursive: true });
+  try {
+    writeFileSync(join(cfg, "config.json"), JSON.stringify({ userSettings: { permissions: { allow: ["command(npm test)"] } } }));
+    assert.match(run(["gemini", "p"]).stderr, /command\(npm test\) \(.*config\.json\)/);
+    writeFileSync(join(cfg, "config.json"), "{}");
+    writeFileSync(join(cfg, "projects", "p1.json"), JSON.stringify({ id: "p1", permissions: { allow: ["unsandboxed(*)"] } }));
+    assert.match(run(["gemini", "p"]).stderr, /unsandboxed\(\*\) \(.*p1\.json\)/);
+  } finally {
+    rmSync(cfg, { recursive: true, force: true });
+  }
+});
+
+test("auth text inside a reply is content, not a sign-in prompt", () => {
+  const r = run(["gemini", "explain Authentication required errors"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(meta(jobIdFrom(r.stdout)).status, "done");
+});
+
+test("a structured-only result is a deliverable", () => {
+  const r = run(["grok", "--json", "--schema", '{"type":"object"}', "p"], { env: { STUB_STRUCTURED_ONLY: "1" } });
+  assert.equal(r.status, 0, r.stderr);
+  const envl = JSON.parse(r.stdout);
+  assert.equal(envl.status, "done");
+  assert.deepEqual(envl.data, { ok: true, who: "grok" });
+  assert.equal(readFileSync(join(home, "jobs", envl.jobId, "reply.md"), "utf8"), '{"ok":true,"who":"grok"}');
+});
+
+test("codex web search lands in retrieval provenance", () => {
+  const r = run(["codex", "please search for it"]);
+  assert.deepEqual(meta(jobIdFrom(r.stdout)).provenance.retrieval.used, ["web_search"]);
+});
+
+test("a failed catalog lookup passes the tier word through for the harness to judge", () => {
+  const r = run(["gemini", "p"], { env: { STUB_MODELS_FAIL: "1" } });
+  assert.match(r.stdout, /"--model","argon"/);
+  assert.equal(meta(jobIdFrom(r.stdout)).provenance.modelPassed, "argon");
+});
+
+test("a consult's record goes from running straight to its final state", async () => {
+  const child = spawn(process.execPath, [BIN, "gemini", "p"], { env: env({ STUB_EMPTY: "1", STUB_DELAY_MS: "300" }) });
+  child.stdin.end();
+  let err = "";
+  child.stderr.on("data", (d) => (err += d));
+  let closed = false;
+  child.on("close", () => (closed = true));
+  const seen = new Set();
+  let id = null;
+  while (!closed) {
+    id ??= err.match(/job (gm-\d{8}-\d{6}-[0-9a-f]{4})/)?.[1];
+    if (id) { try { seen.add(meta(id).status); } catch {} }
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  seen.add(meta(id).status);
+  assert.deepEqual([...seen].filter((x) => x !== "running"), ["failed"]);
 });

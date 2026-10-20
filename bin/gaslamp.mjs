@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// gaslamp: let Claude Code and Codex consult each other from the shell.
+// gaslamp: let Claude Code and Codex consult each other — and Gemini and Grok —
+// from the shell.
 //
 //   gaslamp claude … / codex …   one blocking consult (the heart of it)
+//   gaslamp gemini … / grok …    the same, against Antigravity CLI / Grok Build
 //   gaslamp fleet <backend> …    fan out a bounded fleet of consults
 //   gaslamp jobs / poll          read the durable consult records
 //   gaslamp setup [--local]      allowlist the command for Claude Code
@@ -17,11 +19,14 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
 
-const HELP = `gaslamp ${pkg.version}: let Claude Code and Codex consult each other from the shell.
+const HELP = `gaslamp ${pkg.version}: let Claude Code and Codex consult each other from the shell
+(and consult Gemini and Grok).
 
 Usage:
   gaslamp claude [opts] <prompt|->   Consult Claude (blocks until the reply).
   gaslamp codex  [opts] <prompt|->   Consult Codex  (blocks until the reply).
+  gaslamp gemini [opts] <prompt|->   Consult Gemini via Antigravity CLI (agy).
+  gaslamp grok   [opts] <prompt|->   Consult Grok via Grok Build.
   gaslamp fleet <backend> [opts]     Fan out a fleet of consults (one command).
     -n N <prompt>                    Replicate one prompt across N fresh sessions.
     - < tasks.jsonl                  Or one task per line on stdin (see below).
@@ -47,13 +52,22 @@ Consult options:
   --thread <name>          Named session: continue it if the name is bound,
                            else start fresh and bind it. The pointer chases
                            claude's forked session ids so the name stays hot.
-  --model <m>              Backend model override.
+  --model <m>              Backend model: an exact id, or a tier word —
+                           claude aliases (fable, opus, sonnet, haiku); codex
+                           (astra, sol, luna) and gemini (argon, flash) tiers
+                           resolve to the newest id in the harness's own
+                           catalog. gemini defaults to argon (Antigravity also
+                           serves non-Gemini models under the same account).
   --effort <level>         Reasoning effort (claude --effort / codex
-                           model_reasoning_effort).
+                           model_reasoning_effort / agy --effort /
+                           grok --effort).
   --label <s>              Tag the job record (shows in gaslamp jobs).
   --sandbox <mode>         claude: read-only | danger-full-access
                            codex:  read-only | workspace-write | danger-full-access
-                           Omit to defer to the consulted agent's own config.
+                           gemini: read-only | danger-full-access
+                           grok:   read-only | workspace-write | danger-full-access
+                           Omitted: claude and codex defer to the consulted
+                           agent's own config; gemini and grok run read-only.
   --cwd <dir>              Working directory for the consult (default: here).
   --schema <file|json>     JSON Schema for the reply (native on both backends:
                            claude --json-schema / codex --output-schema). The
@@ -104,14 +118,22 @@ Env knobs:
                            WebSearch + read-only git via Bash(git diff:*) etc)
   GASLAMP_ALLOW_RECURSION  let consulted agents consult back (off = one hop)
   GASLAMP_DEBUG            verbose stderr (spawn argv)
-  CLAUDE_BIN / CODEX_BIN   backend binaries (autodetected otherwise)
+  CLAUDE_BIN / CODEX_BIN / AGY_BIN / GROK_BIN
+                           backend binaries (autodetected otherwise)
+
+Every job record (meta.json) carries provenance: provider, harness version,
+the model the backend reported (or unknown), the vendor system prompt's hash
+where the harness exposes it (grok) or known:false, the retrieval tools the
+consultee had and used, and the gaslamp version and git revision.
 `;
 
 const [cmd, ...rest] = process.argv.slice(2);
 
 switch (cmd) {
   case "claude":
-  case "codex": {
+  case "codex":
+  case "gemini":
+  case "grok": {
     const { runConsult } = await import(new URL("../src/consult.mjs", import.meta.url));
     runConsult(cmd, rest);
     break;

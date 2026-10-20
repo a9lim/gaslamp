@@ -5,7 +5,8 @@
 //   $GASLAMP_HOME/jobs/<id>/
 //     meta.json      backend, status, sessionId, pids, timing, exit
 //     prompt.md      the prompt as sent
-//     events.jsonl   raw backend event stream (claude stream-json / codex --json)
+//     events.jsonl   raw backend event stream (claude stream-json / codex --json /
+//                    agy stream-json / grok streaming-messages-json)
 //     reply.md       final reply text
 //     stderr.log     backend stderr
 //
@@ -17,6 +18,7 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { BACKENDS, JOB_ID_RE } from "./backends.mjs";
 
 export const HOME = () => process.env.GASLAMP_HOME || join(homedir(), ".gaslamp");
 export const jobsDir = () => join(HOME(), "jobs");
@@ -30,7 +32,8 @@ export const alive = (pid) => {
 };
 
 // Ids embed a local timestamp, so they sort chronologically and read at a
-// glance: cl-20260612-141233-9af2 (claude), cx-… (codex), fl-… (fleet).
+// glance: cl-20260612-141233-9af2 (claude), cx-… (codex), gm-… (gemini),
+// gk-… (grok), fl-… (fleet).
 function stampAndRand() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, "0");
@@ -39,10 +42,10 @@ function stampAndRand() {
   return `${stamp}-${rand}`;
 }
 
-export const newJobId = (backend) => `${backend === "claude" ? "cl" : "cx"}-${stampAndRand()}`;
+export const newJobId = (backend) => `${BACKENDS[backend].prefix}-${stampAndRand()}`;
 export const newFleetId = () => `fl-${stampAndRand()}`;
 
-export const looksLikeJobId = (s) => /^(cl|cx)-\d{8}-\d{6}-[0-9a-f]{4}$/.test(String(s));
+export const looksLikeJobId = (s) => JOB_ID_RE.test(String(s));
 export const looksLikeFleetId = (s) => /^fl-\d{8}-\d{6}-[0-9a-f]{4}$/.test(String(s));
 
 // A fleet record lives alongside the consult records under jobs/, but it is
@@ -98,7 +101,7 @@ export function readReply(id) {
 }
 
 // Newest first. The timestamp follows the 2-char backend prefix, so compare
-// past it — pure lexical order would interleave cl-/cx- wrongly.
+// past it — pure lexical order would group by backend instead.
 export function listJobIds() {
   let ids;
   try { ids = readdirSync(jobsDir()); } catch { return []; }
@@ -133,6 +136,11 @@ export function renderTrailer(meta, status = meta.status) {
     if (meta.thread) bits.push(`thread: ${meta.thread}`);
     // a thread pointer chases the freshest session id; prefer it as the handle
     if (meta.sessionId) bits.push(`resume: gaslamp ${meta.backend} ${meta.thread ? `--thread ${meta.thread}` : `--resume ${meta.sessionId}`}`);
+    const p = meta.provenance;
+    if (p?.model && p.model !== "unknown") {
+      const billed = (p.billedModels ?? []).filter((m) => m !== p.model);
+      bits.push(`model: ${p.model}${billed.length ? ` (billed ${billed.join(", ")})` : ""}`);
+    }
     if (meta.usage) bits.push(fmtUsage(meta.usage));
     if (status !== "done") bits.push(`log: ${join(dir, "stderr.log")}`);
   }

@@ -2,7 +2,8 @@
 // uniform one-line entries, following while the job runs.
 //
 // A flashlight, not an event UI: raw events.jsonl is write-through but
-// backend-shaped (claude stream-json vs codex --json); this normalizes both
+// backend-shaped (claude stream-json — which grok's streaming-messages-json
+// mirrors — vs codex --json vs agy stream-json); this normalizes them all
 // into "what is it doing right now" lines and nothing more. `poll`, `jobs`,
 // and the durable records stay the product surface.
 
@@ -20,13 +21,23 @@ const preview = (v, n = 100) => {
 
 // One event → one line (or several, or none — noise is dropped).
 function renderEvent(backend, j) {
-  if (backend === "claude") {
+  if (backend === "gemini") {
+    if (j.event === "init")
+      return [`init · conversation ${short(j.conversation_id)}${j.init?.model ? ` · ${j.init.model}` : ""}`];
+    const st = j.step_update;
+    if (st?.step_type === "tool" && st.state === "DONE")
+      return [`tool → ${st.tool_name ?? "?"} ${preview(st.tool_info?.parameters, 80)}`];
+    if (j.event === "result")
+      return [`result · ${j.result?.status ?? "?"}${j.result?.error ? ` · ${preview(j.result.error, 80)}` : ""}`];
+    return []; // text deltas, step bookkeeping
+  }
+  if (backend === "claude" || backend === "grok") {
     if (j.type === "system" && j.subtype === "init")
       return [`init · session ${short(j.session_id)}${j.model ? ` · ${j.model}` : ""}`];
     if (j.type === "assistant" || j.type === "user") {
       const lines = [];
       for (const p of j.message?.content ?? []) {
-        if (p.type === "tool_use") lines.push(`tool → ${p.name} ${preview(p.input, 80)}`);
+        if (p.type === "tool_use" || p.type === "server_tool_use") lines.push(`tool → ${p.name} ${preview(p.input, 80)}`);
         else if (p.type === "text" && p.text?.trim()) lines.push(`text · ${preview(p.text)}`);
         else if (p.type === "tool_result") lines.push(`tool ← ${preview(p.content, 80)}`);
       }

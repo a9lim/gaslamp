@@ -6,6 +6,9 @@
 Either agent can pass the lamp to the other for a review, a second opinion, or
 a fix; both sides can read and write; consults run in parallel and replies
 trickle in as they finish.
+Since 2.2 either can also consult Gemini (through Google's Antigravity CLI)
+and Grok (through xAI's Grok Build) — read-only by default, provenance
+recorded on every job.
 
 2.0 replaced the 1.0 MCP servers with a direct CLI. The 1.0 design (two MCP
 registrations, a custom stdio server wrapping `claude -p`) fixed the stock
@@ -38,6 +41,8 @@ agent's headless mode, blocks, and prints the reply.
 |-----------|-----------|
 | **Claude → Codex** | `gaslamp codex …` → `codex exec [resume <sid>] --json -o <job>/reply.md -c shell_environment_policy.set.GASLAMP_NESTED="1" … -` |
 | **Codex → Claude** | `gaslamp claude …` → `claude -p --output-format stream-json --verbose [--resume <sid>] …` (prompt on stdin) |
+| **→ Gemini** | `gaslamp gemini …` → `agy --input-format stream-json --output-format stream-json --model <gemini> [--conversation <id>] …` (one `{"event":"user"}` line on stdin) |
+| **→ Grok** | `gaslamp grok …` → `grok --prompt-file /dev/stdin --output-format streaming-messages-json --no-auto-update --rules <preamble> --sandbox read-only --permission-mode default [--resume <id>] …` |
 
 Flow of one consult (`src/consult.mjs`):
 
@@ -150,6 +155,92 @@ Every knob is symmetric across backends and available per-task in fleet
 manifests; every mechanism difference (schema strictness, preamble transport)
 is papered over inside gaslamp, never exposed to the caller.
 
+### 2.2: Gemini and Grok
+
+Two consult targets from the newer vendor harnesses, added with narrow trust:
+read-only by default and provenance on every job (designed by opus, the
+trust model agreed with Codex, 2026-10-20). `src/backends.mjs` is the table
+of what differs per backend (job-id prefix, provider, harness, honest
+sandboxes, what an omitted `--sandbox` means). Verified against agy 1.4.3 and
+grok 1.0.62:
+
+- **agy's `-p` takes the prompt as its value**, so stdin can't carry it there.
+  `--input-format stream-json` reads `{"event":"user","message":{"content"}}`
+  lines from stdin and ends the session at EOF — one line, one turn. The
+  preamble rides in-prompt (no system-prompt flag), as for codex.
+- **agy print mode denies more than its docs say.** Headless docs say
+  workspace reads and writes are auto-allowed; under the default
+  `request-review` preset, `write_file` and `run_command` were both
+  soft-denied, `--mode accept-edits` changed nothing (init still reported
+  `request-review`), and the turn then ended `SUCCESS` with an empty
+  `response` plus a stderr notice. Hence no workspace-write, and empty reply
+  ⇒ failed (a structured-only `--schema` result counts as a reply).
+- **agy's read-only is the preset plus no standing grants.** Allow rules in
+  its permission files (CLI `settings.json`, the app-shared
+  `config/config.json`, every `config/projects/*.json`) run unprompted under
+  request-review, so before spawning, a read-only gemini consult refuses any
+  grant beyond reads, read-only git and the end_session off-ramp, and any
+  lax `toolPermission`; the grants it found go in `provenance.grants`. After
+  spawning, `init.permission_mode` must say request-review or strict, and a
+  run that never sends init fails (Codex's review caught the gap, 2026-10-20).
+- **agy without a sign-in hangs** in print mode: it prints a Google OAuth URL
+  and waits for a pasted code, contrary to its docs. gaslamp watches what
+  agy prints before its init event (stderr and non-JSON stdout, buffered
+  across chunks — never reply content) for `Authentication required` and
+  kills the group.
+- **agy's result usage is conversation-cumulative** (resumes included), so
+  usage is summed from per-step `agent_response` events. Its `input_tokens`
+  EXCLUDE cache reads — a resumed turn reported 2376 input + 5118 cache
+  read ≈ the whole prompt — so both count, Anthropic-style (total_tokens =
+  input + output leaves the cache out).
+- **agy serves Claude and GPT-OSS models under the same account**, and slugs
+  carry the effort (`gemini-4-argon-high`). A gemini consult always passes a
+  Gemini base slug (default tier `argon`); `--effort` picks the level.
+- **grok's `streaming-messages-json` is Anthropic's stream-json shape**:
+  `system/init` with `session_id` + `model` first, `result` last with
+  Anthropic-style usage (uncached input + cache read + cache creation) and
+  `structured_output` under `--json-schema` (which does not override the
+  stream format despite the help text). The claude parser reads it.
+  `--rules` appends to the system prompt — the preamble's transport.
+- **grok reports one model and bills another**: `init.model` says `grok-4.7`,
+  `result.modelUsage` is keyed `grok-4.7-build`. Both are recorded; the
+  trailer shows `model: grok-4.7 (billed grok-4.7-build)`.
+- **grok's permission layer is not a write guard.** Headless
+  `--permission-mode default` denied the `write` tool and let
+  `run_terminal_command touch …` through. Only `--sandbox read-only`
+  (kernel-enforced) held, so that is what read-only means here. The sandbox
+  also wraps MCP servers grok spawns; on macOS it does not cut child network.
+- **grok imports other harnesses' config by default** — `~/.claude/CLAUDE.md`
+  as instructions, Claude's skills, MCP servers (`~/.claude.json`) and hooks,
+  Cursor's likewise. Consults set `GROK_{CLAUDE,CURSOR}_*_ENABLED=0`.
+  `~/.claude/settings.json` permissions are read with no switch; the explicit
+  `--permission-mode` overrides its `defaultMode`.
+- **grok keeps the system prompt on disk** at
+  `$GROK_HOME/sessions/<urlencoded cwd>/<session>/system_prompt.txt`; its
+  sha256 goes in the record, so a silent vendor prompt change shows up as a
+  hash change between jobs.
+- **Never realpath grok.** `~/.local/bin/grok` links to a versioned download;
+  a resolved spawn's process name is `grok-macos-aarch64`, and the
+  end-conversation MCP server finds its harness by name.
+- **Foreign env is dropped for both.** Harnesses pass their parent's env to
+  their shells and MCP servers; a consult inherited the caller's
+  `CLAUDE_CODE_SESSION_ID`, messaging token and account details. An
+  end-conversation server under a gemini consult once resolved its harness to
+  the *calling* Claude session (fixed on its side too).
+- **Every kill path reaps the group at close.** SIGTERM to the group can kill
+  the leader while a descendant that ignores it closes its inherited pipes;
+  `close` then fires before the (unref'd) SIGKILL timer, and the wrapper used
+  to exit with the descendant alive. Signal and refusal paths now SIGKILL the
+  group on close. A consult's record also publishes one terminal state:
+  empty-reply and schema checks run before `meta.json` leaves `running`.
+- **Probes get the consult's environment.** `--version` and `agy models` run
+  with the same env policy as the consult itself.
+- **Tier words resolve against each harness's own catalog** (codex:
+  `$CODEX_HOME/models_cache.json`; agy: `agy models`, ~2 s) to the newest
+  `<family>-<version>-<tier>`; an unknown word passes through for the
+  harness to reject. Resolution and the version probe run before the session
+  lock: no signal handler exists yet, and a kill there must strand nothing.
+
 ## Things that are not obvious
 
 - **`shell_environment_policy.inherit = "core"` strips the sentinel.** A
@@ -165,8 +256,8 @@ is papered over inside gaslamp, never exposed to the caller.
   consulted agent could unset the env var. That's fine — its job is to stop
   accidental recursion, and `GASLAMP_ALLOW_RECURSION=1` is a documented
   opt-out anyway.
-- **The sentinel survives Codex's own delegation.** `--effort ultra` (astra,
-  sol, terra; `gpt-6-astra` shipped 2026-09-07) makes Codex spawn subagents
+- **The sentinel survives Codex's own delegation.** `--effort ultra` (astra
+  and sol; `gpt-6-astra` shipped 2026-09-07) makes Codex spawn subagents
   of its own. Verified live: a subagent's shell still sees `GASLAMP_NESTED=1`,
   so the one-hop guard holds one level down without any extra plumbing — the
   `-c shell_environment_policy.set.…` override is thread config, and the
@@ -303,7 +394,10 @@ the records.
 - `bin/gaslamp.mjs` — CLI entry; dispatches consult verbs / fleet / jobs /
   threads / poll / tail / setup
 - `src/consult.mjs` — the heart: preflights, locks, spawn, stream, signals,
-  schema plumbing (incl. `strictify`), preamble, evidence block
+  schema plumbing (incl. `strictify`), preamble, evidence block, tier
+  resolution, provenance
+- `src/backends.mjs` — the per-backend table (prefix, provider, harness,
+  honest sandboxes, default sandbox) every module reads
 - `src/fleet.mjs` — bounded-concurrency fan-out over `gaslamp <backend> --json`;
   `driveFleet` engine shared by fresh runs and `fleet --resume`
 - `src/jobs.mjs` — durable job + fleet records, `jobs` / `poll` readers, usage
@@ -314,7 +408,8 @@ the records.
   this checkout's absolute bin path; `--skill` installs the direction-aware
   SKILL.md pair for both agents
 - `src/which.mjs` — PATH lookup without spawning a shell
-- `tests/cli.test.mjs` — consults + fleets end-to-end against stub backends
+- `tests/cli.test.mjs` — consults + fleets end-to-end against stub claude,
+  codex, agy and grok binaries
 - `tests/setup.test.mjs` — `addAllow` helper + e2e setup allowlist + skill
   install in a temp HOME
 - `setup.sh` — thin from-source wrapper around `gaslamp setup --local`
@@ -330,7 +425,8 @@ the records.
 | `GASLAMP_NESTED` | set by gaslamp on children | the one-hop sentinel; consult verbs refuse under it. Not user-set |
 | `GASLAMP_FLEET` | set by gaslamp on fleet children | makes a child emit the early "started" receipt. Not user-set |
 | `GASLAMP_DEBUG` | unset | verbose stderr (spawn argv) |
-| `CLAUDE_BIN` / `CODEX_BIN` | autodetected | backend binaries |
+| `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN` / `GROK_BIN` | autodetected | backend binaries |
+| `GROK_HOME` | `~/.grok` | where grok keeps sessions (system prompt hash source) |
 | `CODEX_HOME` | `~/.codex` | where `setup --skill` writes Codex's skill copy |
 
 Exit codes: `0` reply delivered (fleet: all consults done) · `1` consult

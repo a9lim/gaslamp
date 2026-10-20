@@ -3,6 +3,8 @@
 //
 //   gaslamp claude [opts] <prompt|->    spawns `claude -p`
 //   gaslamp codex  [opts] <prompt|->    spawns `codex exec`
+//   gaslamp gemini [opts] <prompt|->    spawns `agy` (Antigravity CLI) in print mode
+//   gaslamp grok   [opts] <prompt|->    spawns `grok` (Grok Build) in headless mode
 //
 // Block-until-reply, deliberately: asynchrony is the HARNESS's job. Each agent
 // backgrounds the shell call with its own facility (Claude Code:
@@ -32,10 +34,13 @@
 //   0 reply delivered · 1 consult failed or killed · 2 usage · 3 nested
 //   (one-hop) refusal · 4 network-disabled sandbox · 5 session busy
 
-import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { BACKENDS } from "./backends.mjs";
 import { which } from "./which.mjs";
 import {
   alive, createJob, jobDir, jobsDir, locksDir, looksLikeJobId,
@@ -64,10 +69,87 @@ const log = (...a) => { if (DEBUG) writeSync(2, "[gaslamp] " + a.join(" ") + "\n
 // pipe is async in Node; a plain write could be truncated).
 const die = (code, msg) => { writeSync(2, `gaslamp: ${msg}\n`); process.exit(code); };
 
-const SANDBOXES = {
-  claude: ["read-only", "danger-full-access"],
-  codex: ["read-only", "workspace-write", "danger-full-access"],
+// The default Gemini tier when --model is omitted. Antigravity also serves
+// Claude and GPT-OSS models under the same account, and an account default
+// pointing at one of them would turn a "gemini" consult into a second opinion
+// from a model the caller already has — so the target always pins a Gemini.
+const GEMINI_DEFAULT_TIER = "argon";
+
+// Tool names that reach the live web (or X) per backend, for the provenance
+// record: what the consultee could retrieve, and what it actually did.
+const RETRIEVAL_TOOLS = {
+  claude: /^(WebSearch|WebFetch)$/,
+  codex: /^web_search/,
+  gemini: /^(search_web|read_url_content|open_browser_url|read_browser_page|browser_)/,
+  grok: /^(web_search|web_fetch|x_search|x_)/,
 };
+
+// Variables a third-party harness has no business inheriting from the calling
+// agent: Claude Code's session id, messaging socket token, account and OAuth
+// details; Codex's and the API keys' equivalents. They reach the consultee's
+// shell and its MCP servers — the end-conversation server keyed its
+// destructive path on CLAUDE_CODE_SESSION_ID before it learned to stop at the
+// nearest harness — and nothing in a Gemini or Grok consult needs them.
+const FOREIGN_ENV = /^(CLAUDE|ANTHROPIC_|CODEX_|OPENAI_)/;
+
+// Grok Build reads other harnesses' configuration by default — ~/.claude's
+// CLAUDE.md as its own instructions, Claude's skills, MCP servers and hooks,
+// Cursor's the same. A consult must not hand the consultee the caller's
+// identity file or run the caller's hooks. Machines bootstrapped from a9lim's
+// ledger turn these off in ~/.grok/config.toml; this covers every other one.
+// (Grok also reads ~/.claude/settings.json permissions, with no switch; the
+// explicit --permission-mode below overrides its defaultMode.)
+const GROK_COMPAT_OFF = Object.fromEntries(
+  ["CLAUDE", "CURSOR"].flatMap((v) => ["AGENTS", "SKILLS", "RULES", "MCPS", "HOOKS"]
+    .map((c) => [`GROK_${v}_${c}_ENABLED`, "0"])));
+
+// The environment every process gaslamp starts for a backend gets — the
+// consult itself and its probes (`--version`, `agy models`) alike.
+function backendEnv(backend) {
+  const env = { ...process.env, GASLAMP_NESTED: "1" };
+  // Keychain OAuth is authoritative for the consulted Claude: a stale env key
+  // 401s every call (1.0's hardest auth lesson). No Codex analog needed.
+  if (backend === "claude") delete env.ANTHROPIC_API_KEY;
+  if (backend === "gemini" || backend === "grok")
+    for (const k of Object.keys(env)) if (FOREIGN_ENV.test(k)) delete env[k];
+  if (backend === "grok") Object.assign(env, GROK_COMPAT_OFF, { GROK_DISABLE_AUTOUPDATER: "1" });
+  return env;
+}
+
+// What a read-only gemini consult may find pre-allowed in Antigravity's
+// permission files: reads, read-only git (read-capable like the claude read
+// set — git's own --output flags aside), and the end_session off-ramp. Any
+// other grant (writes, other commands, unsandboxed, browser actuation, other
+// MCP tools) would run unprompted under the request-review preset, so its
+// presence refuses the consult rather than letting "read-only" mean less.
+const AGY_READ_GRANT = /^(read_file|read_url)\(|^command\(git (diff|log|show|status)\)$|^mcp\(end-conversation\/(\*|end_session)\)$/;
+const AGY_LAX_PRESETS = new Set(["always-proceed", "proceed-in-sandbox"]);
+
+// Allow rules and the tool-permission preset from every file the CLI merges:
+// its settings.json, the settings shared with the Antigravity app, and the
+// per-project files (all of them — which one applies is not knowable here).
+function agyPermissionState() {
+  const root = join(homedir(), ".gemini");
+  const files = [join(root, "antigravity-cli", "settings.json"), join(root, "config", "config.json")];
+  try {
+    for (const f of readdirSync(join(root, "config", "projects")))
+      if (f.endsWith(".json")) files.push(join(root, "config", "projects", f));
+  } catch {}
+  const grants = [], presets = [];
+  const walk = (node, file) => {
+    if (Array.isArray(node)) return node.forEach((n) => walk(n, file));
+    if (!node || typeof node !== "object") return;
+    for (const [k, v] of Object.entries(node)) {
+      if (k === "allow" && Array.isArray(v)) for (const r of v) if (typeof r === "string") grants.push({ rule: r, file });
+      if (k === "toolPermission" && typeof v === "string") presets.push({ preset: v, file });
+      walk(v, file);
+    }
+  };
+  for (const f of files) {
+    try { walk(JSON.parse(readFileSync(f, "utf8")), f); } catch {}
+  }
+  return { grants, presets };
+}
 
 // The consult preamble: the one piece of framing a consulted agent needs.
 // Workflow subagents are told their final text IS the return value; a consult
@@ -82,6 +164,18 @@ const PREAMBLE =
   "Distinguish what you verified from what you infer.";
 
 function resolveBin(backend) {
+  if (backend === "gemini") {
+    for (const c of [process.env.AGY_BIN, join(homedir(), ".local/bin/agy")].filter(Boolean))
+      if (existsSync(c)) return c;
+    return which("agy") || "agy";
+  }
+  if (backend === "grok") {
+    // Never realpath this one: the end-conversation server finds the harness it
+    // runs under by process name, and a resolved spawn is named after the
+    // versioned download (grok-macos-aarch64), not `grok`.
+    if (process.env.GROK_BIN && existsSync(process.env.GROK_BIN)) return process.env.GROK_BIN;
+    return which("grok") || [join(homedir(), ".grok/bin/grok")].find(existsSync) || "grok";
+  }
   if (backend === "claude") {
     for (const c of [process.env.CLAUDE_BIN, join(homedir(), ".local/bin/claude")].filter(Boolean))
       if (existsSync(c)) return c;
@@ -192,6 +286,135 @@ function acquireLock(backend, sid, jobId) {
   die(5, `could not acquire the lock for session ${sid} under ${locksDir()}`);
 }
 
+// ---- model tiers --------------------------------------------------------------
+// --model takes a tier word as well as an exact id. claude's CLI resolves its
+// own aliases (fable, opus, sonnet, haiku); codex and agy only take versioned
+// ids, so a bare tier is resolved here against the harness's OWN live catalog
+// — the newest listed gpt-<version>-<tier> or gemini-<version>-<tier> — and a
+// new generation is picked up without a gaslamp release. A word the catalog
+// does not know passes through untouched, and the harness reports it.
+const versionKey = (v) => v.split(".").map(Number);
+const compareVersions = (a, b) => {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] ?? 0) - (b[i] ?? 0);
+    if (d) return d;
+  }
+  return 0;
+};
+export function newestOfTier(slugs, family, tier) {
+  const re = new RegExp(`^${family}-(\\d+(?:\\.\\d+)*)-${tier}$`);
+  let best = null, bestV = null;
+  for (const slug of slugs) {
+    const m = re.exec(slug);
+    if (!m) continue;
+    const v = versionKey(m[1]);
+    if (!bestV || compareVersions(v, bestV) > 0) { best = slug; bestV = v; }
+  }
+  return best;
+}
+
+export function codexCatalog() {
+  try {
+    const home = process.env.CODEX_HOME || join(homedir(), ".codex");
+    const d = JSON.parse(readFileSync(join(home, "models_cache.json"), "utf8"));
+    return (d.models ?? []).filter((m) => m.visibility !== "hide").map((m) => m.slug).filter(Boolean);
+  } catch { return []; }
+}
+
+// `agy models` lists one slug per effort level (gemini-4-argon-high, …); the
+// base slug takes the model's default effort, and --effort picks another.
+export function agyCatalog(bin, env = process.env) {
+  try {
+    const out = execFileSync(bin, ["models"], { encoding: "utf8", timeout: 30000, stdio: ["ignore", "pipe", "ignore"], env });
+    return [...new Set(out.split("\n").map((l) => l.split("\t")[0].trim())
+      .filter((s) => /^[a-z0-9.-]+$/.test(s))
+      .map((s) => s.replace(/-(low|medium|high|xhigh|max)$/, "")))];
+  } catch { return []; }
+}
+
+function resolveModel(backend, model, bin, env) {
+  if (backend === "gemini") model ??= GEMINI_DEFAULT_TIER;
+  if (!model || !/^[a-z]+$/.test(model)) return model ?? null;
+  if (backend === "codex") return newestOfTier(codexCatalog(), "gpt", model) ?? model;
+  if (backend === "gemini") return newestOfTier(agyCatalog(bin, env), "gemini", model) ?? model;
+  return model;
+}
+
+// ---- provenance -----------------------------------------------------------------
+// Vendors can change the model or the system prompt behind a stable product
+// name, so every job records what it can about who actually answered.
+const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const PKG_VERSION = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8")).version;
+let revisionMemo;
+function gaslampRevision() {
+  if (revisionMemo !== undefined) return revisionMemo;
+  try {
+    const git = (...a) => execFileSync("git", ["-C", PKG_ROOT, ...a], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 }).trim();
+    const rev = git("rev-parse", "--short=12", "HEAD");
+    revisionMemo = git("status", "--porcelain", "--untracked-files=no") ? `${rev}+dirty` : rev;
+  } catch { revisionMemo = "unknown"; }
+  return revisionMemo;
+}
+
+function harnessVersion(bin, env) {
+  try {
+    const out = execFileSync(bin, ["--version"], { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "ignore"], env });
+    return out.split("\n").find((l) => l.trim())?.trim() || "unknown";
+  } catch { return "unknown"; }
+}
+
+// Grok writes each session's full system prompt next to its transcript —
+// the one backend whose vendor prompt is knowable, so it is hashed into the
+// record (a change between jobs is visible without storing the text twice).
+function grokSystemPrompt(sessionId, cwd) {
+  const root = join(process.env.GROK_HOME || join(homedir(), ".grok"), "sessions");
+  const candidates = [join(root, encodeURIComponent(cwd), sessionId, "system_prompt.txt")];
+  try { for (const d of readdirSync(root)) candidates.push(join(root, d, sessionId, "system_prompt.txt")); } catch {}
+  for (const path of candidates) {
+    try {
+      const text = readFileSync(path, "utf8");
+      return { known: true, sha256: createHash("sha256").update(text).digest("hex"), chars: text.length, path };
+    } catch {}
+  }
+  return { known: false };
+}
+
+function geminiArgs(o, resumeSid, schemaText, model, sandbox) {
+  // Print mode's -p takes the prompt as an argument; streaming input reads it
+  // from stdin as one {"event":"user"} line and ends the session at EOF, which
+  // keeps the prompt-on-stdin contract (no argv-size or quoting traps).
+  const args = ["--input-format", "stream-json", "--output-format", "stream-json", "--model", model];
+  if (o.effort) args.push("--effort", o.effort);
+  if (resumeSid) args.push("--conversation", resumeSid);
+  if (schemaText) args.push("--json-schema", schemaText);
+  // read-only adds no flag: the default request-review preset already denies
+  // writes, shell and web reads in print mode. Before spawn, the permission
+  // files are checked for grants that would let anything else through; after,
+  // the init event's permission_mode must confirm the preset (fail closed).
+  if (sandbox === "danger-full-access") args.push("--dangerously-skip-permissions");
+  return args;
+}
+
+function grokArgs(o, resumeSid, schemaText, sandbox) {
+  // streaming-messages-json is Anthropic's stream-json shape (system init with
+  // session_id and model first, result last) — the claude parser reads it.
+  const args = ["--prompt-file", "/dev/stdin", "--output-format", "streaming-messages-json", "--no-auto-update"];
+  // --rules appends to the system prompt: claude's --append-system-prompt.
+  if (!o.raw) args.push("--rules", PREAMBLE);
+  if (schemaText) args.push("--json-schema", schemaText);
+  // The kernel sandbox (Seatbelt / Landlock) is the read-only guarantee. The
+  // permission layer is not: under --permission-mode default a headless run
+  // denied the write tool but ran an arbitrary `touch` through the shell
+  // (probed on 1.0.62). read-only still writes ~/.grok (sessions) and temp dirs.
+  if (sandbox === "read-only") args.push("--sandbox", "read-only", "--permission-mode", "default");
+  else if (sandbox === "workspace-write") args.push("--sandbox", "workspace", "--permission-mode", "acceptEdits");
+  else if (sandbox === "danger-full-access") args.push("--sandbox", "off", "--always-approve");
+  if (resumeSid) args.push("--resume", resumeSid);
+  if (o.model) args.push("-m", o.model);
+  if (o.effort) args.push("--effort", o.effort);
+  return args;
+}
+
 function claudeArgs(o, resumeSid, schemaText) {
   // stream-json (not plain json) so events land incrementally: the session id
   // arrives in the init event within seconds, and the write-through record
@@ -247,11 +470,17 @@ export function runConsult(backend, argv) {
   if (process.env.CODEX_SANDBOX_NETWORK_DISABLED === "1")
     die(4, "network is disabled in this sandbox (CODEX_SANDBOX_NETWORK_DISABLED=1) — a consulted agent could reach neither Anthropic nor OpenAI. Re-run with network access (escalated permissions, or sandbox_mode/network_access in ~/.codex/config.toml).");
 
-  if (o.sandbox && !SANDBOXES[backend].includes(o.sandbox)) {
+  const facts = BACKENDS[backend];
+  if (o.sandbox && !facts.sandboxes.includes(o.sandbox)) {
     die(2, backend === "claude" && o.sandbox === "workspace-write"
       ? "claude has no filesystem sandbox, so there is no honest workspace-write — use read-only, danger-full-access, or omit --sandbox to defer to the user's own config"
-      : `bad --sandbox "${o.sandbox}" (${backend}: ${SANDBOXES[backend].join(" | ")})`);
+      : backend === "gemini" && o.sandbox === "workspace-write"
+        ? "Antigravity print mode denies file writes unless every permission is skipped, so there is no honest workspace-write — use read-only (the default) or danger-full-access"
+        : `bad --sandbox "${o.sandbox}" (${backend}: ${facts.sandboxes.join(" | ")})`);
   }
+  // claude/codex: omitted = the consulted agent's own config. gemini/grok:
+  // omitted = read-only (BACKENDS.defaultSandbox).
+  const sandbox = o.sandbox ?? facts.defaultSandbox;
 
   // ---- prompt (argv, or stdin via `-` / piped-with-no-arg) -------------------
   let prompt = o.prompt;
@@ -282,6 +511,25 @@ export function runConsult(backend, argv) {
   }
   const thread = o.thread ? readThread(backend, o.thread) : null;
   const resumeSid = o.resume ? resolveResume(backend, o.resume) : thread?.sessionId ?? null;
+  // Everything that runs the harness synchronously (the tier lookup can take
+  // agy ~2s, the version probe a few ms) happens before the lock is taken and
+  // the record exists: no signal handler is installed yet, and a kill here
+  // must not strand either.
+  const bin = resolveBin(backend);
+  const env = backendEnv(backend);
+  let grants = null;
+  if (backend === "gemini" && sandbox === "read-only") {
+    const state = agyPermissionState();
+    const lax = state.presets.filter((p) => AGY_LAX_PRESETS.has(p.preset));
+    const open = state.grants.filter((g) => !AGY_READ_GRANT.test(g.rule));
+    if (lax.length || open.length)
+      die(1, "Antigravity's settings would let a read-only consult act unprompted — " +
+        [...lax.map((p) => `toolPermission "${p.preset}" (${p.file})`), ...open.map((g) => `${g.rule} (${g.file})`)].join(", ") +
+        ". Remove them, or pass --sandbox danger-full-access to consult without the guarantee.");
+    grants = state.grants.map((g) => g.rule);
+  }
+  const model = resolveModel(backend, o.model, bin, env);
+  const version = harnessVersion(bin, env);
   const id = newJobId(backend);
   let lockPath = resumeSid ? acquireLock(backend, resumeSid, id) : null;
   const releaseLock = () => { if (lockPath) { try { unlinkSync(lockPath); } catch {} lockPath = null; } };
@@ -292,16 +540,26 @@ export function runConsult(backend, argv) {
     id, backend, status: "running",
     sessionId: resumeSid, resumedFrom: resumeSid, thread: o.thread ?? null,
     label: o.label ?? null,
-    model: o.model ?? null, sandbox: o.sandbox ?? null, effort: o.effort ?? null,
+    model, sandbox, effort: o.effort ?? null,
     cwd: o.cwd || process.cwd(),
     pid: process.pid, childPid: null, exitCode: null, signal: null,
     startedAt: new Date().toISOString(), endedAt: null,
     promptChars: prompt.length, schema: !!schemaText, raw: !!o.raw,
+    provenance: {
+      provider: facts.provider, harness: facts.harness, harnessVersion: version,
+      // `model` is what the backend reported answering with; unknown until it
+      // does (codex never reports one in its event stream).
+      model: "unknown", modelRequested: o.model ?? null, modelPassed: model,
+      permissionMode: null, sandbox,
+      ...(grants ? { grants } : {}),
+      systemPrompt: { known: false },
+      retrieval: { available: null, used: [] },
+      gaslamp: { version: PKG_VERSION, revision: gaslampRevision() },
+    },
   };
   createJob(meta, prompt);
 
   // ---- spawn -----------------------------------------------------------------
-  const bin = resolveBin(backend);
   const replyPath = join(dir, "reply.md");
   // schema.json lands in the job dir for BOTH backends: codex needs the file,
   // and the record should show what was actually sent — for codex that is the
@@ -313,12 +571,10 @@ export function runConsult(backend, argv) {
       : schemaText;
     writeFileSync(schemaPath, sent.endsWith("\n") ? sent : sent + "\n");
   }
-  const args = backend === "claude" ? claudeArgs(o, resumeSid, schemaText) : codexArgs(o, resumeSid, replyPath, schemaPath);
-
-  const env = { ...process.env, GASLAMP_NESTED: "1" };
-  // Keychain OAuth is authoritative for the consulted Claude: a stale env key
-  // 401s every call (1.0's hardest auth lesson). No Codex analog needed.
-  if (backend === "claude") delete env.ANTHROPIC_API_KEY;
+  const args = backend === "claude" ? claudeArgs({ ...o, model }, resumeSid, schemaText)
+    : backend === "codex" ? codexArgs({ ...o, model }, resumeSid, replyPath, schemaPath)
+    : backend === "gemini" ? geminiArgs(o, resumeSid, schemaText, model, sandbox)
+    : grokArgs(o, resumeSid, schemaText, sandbox);
 
   log("spawn", bin, JSON.stringify(args));
   // detached → the child leads its own process group, so signal forwarding can
@@ -326,6 +582,10 @@ export function runConsult(backend, argv) {
   const child = spawn(bin, args, { cwd: meta.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
   meta.childPid = child.pid ?? null;
   writeMeta(meta);
+  const killGroup = (sig) => {
+    try { process.kill(-child.pid, sig); }
+    catch { try { child.kill(sig); } catch {} }
+  };
 
   writeSync(2, `[gaslamp] → ${backend} · job ${id} · watch: tail -f ${join(dir, "events.jsonl")}\n`);
 
@@ -340,74 +600,165 @@ export function runConsult(backend, argv) {
   child.stdin.on("error", () => {}); // EPIPE if the child dies before reading
   // prompt.md records the CALLER's content; the preamble is mechanism, applied
   // here at the spawn boundary (codex has no --append-system-prompt analog).
-  if (backend === "codex" && !o.raw)
-    child.stdin.write("<gaslamp_consult>\n" + PREAMBLE + "\n</gaslamp_consult>\n\n");
-  child.stdin.write(prompt);
+  const preamble = o.raw ? "" : "<gaslamp_consult>\n" + PREAMBLE + "\n</gaslamp_consult>\n\n";
+  if (backend === "gemini") {
+    child.stdin.write(JSON.stringify({ event: "user", message: { content: preamble + prompt } }) + "\n");
+  } else {
+    if (backend === "codex") child.stdin.write(preamble);
+    child.stdin.write(prompt);
+  }
   child.stdin.end();
 
   const events = createWriteStream(join(dir, "events.jsonl"), { flags: "a" });
   const errlog = createWriteStream(join(dir, "stderr.log"), { flags: "a" });
-  child.stderr.on("data", (d) => errlog.write(d));
+  // Decode as UTF-8 streams: a multibyte character split across two chunks
+  // must not turn into replacement characters in the parsed events.
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+
+  // A consult the harness can't start honestly is stopped, not left to run.
+  let refusal = null;
+  const refuse = (why) => {
+    if (refusal) return;
+    refusal = why;
+    writeSync(2, `[gaslamp] ${why}\n`);
+    killGroup("SIGTERM");
+    setTimeout(() => killGroup("SIGKILL"), 2000).unref();
+  };
+  // `agy` without a cached sign-in prints a Google sign-in URL and waits for a
+  // pasted code forever in print mode (1.4.3; its docs say it exits). Only
+  // what the harness prints before its init event counts — stderr and any
+  // non-JSON stdout, accumulated across chunks — never protocol content,
+  // where a reply may well say "authentication required".
+  let initSeen = false, preInit = "";
+  const AUTH_NOTICE = /Authentication required/i;
+  const notSignedIn = () => refuse("agy is not signed in — run `agy` once in a terminal to sign in, then retry");
+  const watchAuth = (text) => {
+    if (backend !== "gemini" || initSeen) return;
+    preInit = (preInit + text).slice(-4096);
+    if (AUTH_NOTICE.test(preInit)) notSignedIn();
+  };
+  child.stderr.on("data", (d) => { errlog.write(d); watchAuth(d); });
+
+  const prov = meta.provenance;
+  const noteTool = (name) => {
+    if (name && RETRIEVAL_TOOLS[backend].test(name) && !prov.retrieval.used.includes(name))
+      prov.retrieval.used.push(name);
+  };
 
   // ---- event stream: write through; fish out session id + reply --------------
   let buf = "", resultText = null, resultErr = false, lastAgentText = null, structuredOut;
-  const usageAcc = { input: 0, output: 0 }; // codex reports per turn; sum them
+  let initValidated = false; // gemini read-only: the harness confirmed its preset
+  const usageAcc = { input: 0, output: 0 }; // codex and agy report per turn/step; sum them
+  const claudeShaped = backend === "claude" || backend === "grok";
+  const handleLine = (raw) => {
+    const line = raw.trim();
+    if (!line) return;
+    let j; try { j = JSON.parse(line); } catch { watchAuth(line + "\n"); return; }
+    const sid = claudeShaped
+      ? ((j.type === "system" && j.subtype === "init") || j.type === "result" ? j.session_id : null)
+      : backend === "codex" ? (j.type === "thread.started" ? (j.thread_id ?? j.threadId) : null)
+      : (j.event === "init" || j.event === "result" ? (j.conversation_id ?? j.result?.conversation_id) : null);
+    if (sid) {
+      if (meta.sessionId !== sid) { meta.sessionId = sid; writeMeta(meta); } // early: the recovery handle
+      // Bind/re-point the thread the moment the session is known — claude
+      // resumes fork a fresh session id, and the pointer must chase it.
+      if (o.thread) writeThread({
+        backend, name: o.thread, sessionId: sid, lastJobId: id,
+        createdAt: thread?.createdAt ?? meta.startedAt, updatedAt: new Date().toISOString(),
+      });
+    }
+    if (claudeShaped && j.type === "system" && j.subtype === "init") {
+      if (j.model) prov.model = j.model;
+      prov.permissionMode = j.permissionMode ?? null;
+      if (Array.isArray(j.tools)) prov.retrieval.available = j.tools.filter((t) => RETRIEVAL_TOOLS[backend].test(t));
+      writeMeta(meta);
+    } else if (claudeShaped && j.type === "assistant") {
+      for (const c of j.message?.content ?? []) {
+        if (c.type === "tool_use" || c.type === "server_tool_use") noteTool(c.name);
+        if (c.type === "tool_use" && c.name === "use_tool") noteTool(c.input?.tool_name);
+      }
+    } else if (backend === "gemini" && j.event === "init") {
+      initSeen = true;
+      const init = j.init ?? {};
+      if (init.model) prov.model = init.model;
+      prov.permissionMode = init.permission_mode ?? null;
+      // The browser toolset is ~20 tools; one entry says the same thing.
+      if (Array.isArray(init.tools)) prov.retrieval.available = [...new Set(init.tools
+        .filter((t) => RETRIEVAL_TOOLS.gemini.test(t)).map((t) => t.startsWith("browser_") ? "browser_*" : t))];
+      writeMeta(meta);
+      // Read-only rests on Antigravity's request-review (or strict) preset;
+      // a laxer one would let the consult act unprompted.
+      if (sandbox === "read-only" && !["request-review", "strict"].includes(prov.permissionMode))
+        refuse(`agy reports permission mode "${prov.permissionMode}", not request-review — refusing a read-only consult it would not enforce`);
+      else initValidated = true;
+    } else if (backend === "gemini" && j.event === "step_update") {
+      const st = j.step_update ?? {};
+      if (st.step_type === "tool" && st.state === "DONE") noteTool(st.tool_name);
+      if (st.step_type === "agent_response" && st.state === "DONE" && st.usage) {
+        // Per step; the result event's usage is cumulative over the whole
+        // conversation, resumes included. input_tokens EXCLUDES cache reads
+        // (a resumed turn: 2376 input + 5118 cache read ≈ the full prompt),
+        // so both count, as for claude.
+        usageAcc.input += (st.usage.input_tokens ?? 0) + (st.usage.cache_read_tokens ?? 0);
+        usageAcc.output += st.usage.output_tokens ?? 0;
+        meta.usage = { inputTokens: usageAcc.input, outputTokens: usageAcc.output, costUsd: null };
+      }
+    } else if (backend === "gemini" && j.event === "result") {
+      const r = j.result ?? {};
+      resultText = r.response ?? null;
+      resultErr = r.status !== "SUCCESS";
+      if (r.error) writeSync(2, `[gaslamp] agy: ${r.error}\n`);
+      if (r.structured_output !== undefined) structuredOut = r.structured_output;
+    } else if (claudeShaped && j.type === "result") {
+      resultText = j.result ?? j.content ?? null;
+      resultErr = !!j.is_error;
+      if (j.structured_output !== undefined) structuredOut = j.structured_output;
+      // Grok bills by the model it actually ran (grok-4.7-build behind a
+      // reported grok-4.7), which only shows up here.
+      if (j.modelUsage) prov.billedModels = Object.keys(j.modelUsage);
+      // Fleets are quota-shaped, so quota should be visible: inputTokens
+      // counts cache reads/writes too (that's what the meter meters).
+      if (j.usage) meta.usage = {
+        inputTokens: (j.usage.input_tokens ?? 0) + (j.usage.cache_read_input_tokens ?? 0)
+          + (j.usage.cache_creation_input_tokens ?? 0),
+        outputTokens: j.usage.output_tokens ?? 0,
+        costUsd: j.total_cost_usd ?? null,
+      };
+    } else if (backend === "codex" && j.type === "turn.completed" && j.usage) {
+      // OpenAI semantics differ from Anthropic's: input_tokens already
+      // INCLUDES the cached portion (cached_input_tokens is a subset, and
+      // codex's own total_tokens = input + output), so adding it again
+      // double-counts cache hits.
+      usageAcc.input += j.usage.input_tokens ?? 0;
+      usageAcc.output += j.usage.output_tokens ?? 0;
+      meta.usage = { inputTokens: usageAcc.input, outputTokens: usageAcc.output, costUsd: null };
+    } else if (backend === "codex" && (j.type === "item.started" || j.type === "item.completed")) {
+      const item = j.item ?? {};
+      const t = item.type ?? item.item_type;
+      if (t === "web_search") noteTool("web_search");
+      // Tolerant fallback if -o never lands (schema drift across versions).
+      if (j.type === "item.completed" && t === "agent_message" && typeof item.text === "string")
+        lastAgentText = item.text;
+    }
+  };
   child.stdout.on("data", (d) => {
     events.write(d);
-    buf += d.toString();
+    buf += d;
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
+      const line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
-      if (!line) continue;
-      let j; try { j = JSON.parse(line); } catch { continue; }
-      const sid = backend === "claude"
-        ? ((j.type === "system" && j.subtype === "init") || j.type === "result" ? j.session_id : null)
-        : (j.type === "thread.started" ? (j.thread_id ?? j.threadId) : null);
-      if (sid) {
-        if (meta.sessionId !== sid) { meta.sessionId = sid; writeMeta(meta); } // early: the recovery handle
-        // Bind/re-point the thread the moment the session is known — claude
-        // resumes fork a fresh session id, and the pointer must chase it.
-        if (o.thread) writeThread({
-          backend, name: o.thread, sessionId: sid, lastJobId: id,
-          createdAt: thread?.createdAt ?? meta.startedAt, updatedAt: new Date().toISOString(),
-        });
-      }
-      if (backend === "claude" && j.type === "result") {
-        resultText = j.result ?? j.content ?? null;
-        resultErr = !!j.is_error;
-        if (j.structured_output !== undefined) structuredOut = j.structured_output;
-        // Fleets are quota-shaped, so quota should be visible: inputTokens
-        // counts cache reads/writes too (that's what the meter meters).
-        if (j.usage) meta.usage = {
-          inputTokens: (j.usage.input_tokens ?? 0) + (j.usage.cache_read_input_tokens ?? 0)
-            + (j.usage.cache_creation_input_tokens ?? 0),
-          outputTokens: j.usage.output_tokens ?? 0,
-          costUsd: j.total_cost_usd ?? null,
-        };
-      } else if (backend === "codex" && j.type === "turn.completed" && j.usage) {
-        // OpenAI semantics differ from Anthropic's: input_tokens already
-        // INCLUDES the cached portion (cached_input_tokens is a subset, and
-        // codex's own total_tokens = input + output), so adding it again
-        // double-counts cache hits.
-        usageAcc.input += j.usage.input_tokens ?? 0;
-        usageAcc.output += j.usage.output_tokens ?? 0;
-        meta.usage = { inputTokens: usageAcc.input, outputTokens: usageAcc.output, costUsd: null };
-      } else if (backend === "codex" && j.type === "item.completed") {
-        // Tolerant fallback if -o never lands (schema drift across versions).
-        const item = j.item ?? {};
-        if ((item.type === "agent_message" || item.item_type === "agent_message") && typeof item.text === "string")
-          lastAgentText = item.text;
-      }
+      handleLine(line);
     }
+    // A prompt waiting for input may never end its line: look at the
+    // unterminated non-JSON tail too, without consuming it.
+    if (backend === "gemini" && !initSeen && buf && !buf.trimStart().startsWith("{")
+        && AUTH_NOTICE.test(preInit + buf)) notSignedIn();
   });
 
   // ---- signals: kill the group, finalize, no orphans --------------------------
   let killedBy = null;
-  const killGroup = (sig) => {
-    try { process.kill(-child.pid, sig); }
-    catch { try { child.kill(sig); } catch {} }
-  };
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
     process.on(sig, () => {
       if (killedBy) return killGroup("SIGKILL");
@@ -418,14 +769,17 @@ export function runConsult(backend, argv) {
     });
   }
 
-  const finalize = (status, code) => {
+  // One terminal state, published once: the reply is written and validated
+  // before meta.json leaves "running" and the session lock is released.
+  const finalize = (status, code, reply) => {
     if (meta.status !== "running") return;
+    if (reply != null) writeFileSync(replyPath, reply);
+    if (backend === "grok" && meta.sessionId) prov.systemPrompt = grokSystemPrompt(meta.sessionId, meta.cwd);
     meta.status = status;
     meta.exitCode = code;
     meta.signal = killedBy;
     meta.endedAt = new Date().toISOString();
-    if (backend === "claude" && resultText != null) writeFileSync(replyPath, String(resultText));
-    if (backend === "codex" && !existsSync(replyPath) && lastAgentText != null) writeFileSync(replyPath, lastAgentText);
+    if (refusal) meta.refusal = refusal;
     writeMeta(meta);
     releaseLock();
   };
@@ -436,11 +790,36 @@ export function runConsult(backend, argv) {
   });
 
   child.on("close", (code) => {
+    if (buf.trim()) handleLine(buf); // a final event without its newline
+    buf = "";
     events.end();
     errlog.end();
-    finalize(killedBy ? "killed" : (code !== 0 || resultErr) ? "failed" : "done", code);
-    const reply = existsSync(replyPath) ? readFileSync(replyPath, "utf8") : null;
+    // The leader is gone, but a descendant that ignored SIGTERM (and closed
+    // its inherited pipes, so `close` could fire) may not be: on any kill
+    // path, finish the group now rather than trusting the unref'd timer.
+    if (killedBy || refusal) killGroup("SIGKILL");
 
+    // The deliverable. codex writes it via -o (agent_message as fallback);
+    // the others hand it over in the result event — as text, or for a
+    // --schema consult possibly only as structured_output.
+    let reply;
+    if (backend === "codex") reply = existsSync(replyPath) ? readFileSync(replyPath, "utf8") : lastAgentText;
+    else reply = resultText != null && String(resultText).trim() ? String(resultText)
+      : structuredOut !== undefined ? JSON.stringify(structuredOut) : resultText;
+
+    let status = killedBy ? "killed" : (refusal || code !== 0 || resultErr) ? "failed" : "done";
+    if (status === "done" && backend === "gemini" && sandbox === "read-only" && !initValidated) {
+      status = "failed";
+      refusal = "agy reported no init event, so its permission mode — the read-only guarantee — went unconfirmed";
+      writeSync(2, `[gaslamp] ${refusal}\n`);
+    }
+    // agy and grok report success for a turn that ended on a denied tool call
+    // with nothing to say (agy: "no output produced", on stderr). An empty
+    // reply is not a deliverable.
+    if (status === "done" && (backend === "gemini" || backend === "grok") && !reply?.trim()) {
+      status = "failed";
+      writeSync(2, `[gaslamp] ${backend} returned an empty reply — marking the consult failed\n`);
+    }
     // A schema consult's contract is a typed reply: parse it (claude hands the
     // object over in the result event; codex's reply.md IS the JSON), and an
     // unparseable reply is a FAILED consult, not a quiet string.
@@ -448,12 +827,12 @@ export function runConsult(backend, argv) {
     if (schemaText) {
       data = structuredOut ?? null;
       if (data == null && reply != null) { try { data = JSON.parse(reply); } catch {} }
-      if (data == null && meta.status === "done") {
-        meta.status = "failed";
-        writeMeta(meta);
+      if (data == null && status === "done") {
+        status = "failed";
         writeSync(2, "[gaslamp] --schema was set but the reply is not valid JSON — marking the consult failed\n");
       }
     }
+    finalize(status, code, backend === "codex" && existsSync(replyPath) ? null : reply);
 
     if (o.json) {
       process.stdout.write(JSON.stringify({
