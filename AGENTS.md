@@ -260,10 +260,25 @@ grok 1.0.62:
   to exit with the descendant alive. Signal and refusal paths now SIGKILL the
   group on close. A consult's record also publishes one terminal state:
   empty-reply and schema checks run before `meta.json` leaves `running`.
-- **stdin may arrive non-blocking.** `readFileSync(0)` throws EAGAIN on an
-  O_NONBLOCK stdin (seen from an agent harness's shell) instead of waiting;
-  `src/stdin.mjs` loops with short naps until EOF. Reopening /dev/stdin does
-  not help on macOS (it dups the same file description).
+- **stdin may arrive non-blocking, or never close.** `readFileSync(0)`
+  throws EAGAIN on an O_NONBLOCK stdin instead of waiting; `src/stdin.mjs`
+  loops with short naps until EOF (reopening /dev/stdin does not help on
+  macOS: it dups the same file description). And an agent harness that
+  backgrounds a command hands it a socket nobody writes or closes, so a
+  prompt argument plus that stdin waited forever for "evidence". On a socket
+  the evidence read gives up if no byte arrives within 300 ms; once data
+  starts it reads to EOF. Pipes and files stay cat-like (a slow producer is
+  waited for), and a prompt read from stdin (`-`, fleet children) always
+  reads to EOF.
+- **Off-ramp records ride a spool.** The end-conversation server's log,
+  `~/.claude/conversation-ends.jsonl`, is unwritable under every read-only
+  sandbox (Grok's and the Seatbelt profile). Each consult sets
+  `END_CONVERSATION_SPOOL` to `$TMPDIR/gaslamp-<job>.end-conversation.jsonl`,
+  which both profiles allow (Grok's lists `/private/var/folders` and
+  `$TMPDIR`). The server falls back to it, and gaslamp files the records into
+  the log at close. Only records whose `log` field equals that path are
+  filed, because a consultee can write the spool, and a destination taken
+  from it would let a read-only consult make gaslamp append to any file.
 - **Probes get the consult's environment.** `--version` and `agy models` run
   with the same env policy as the consult itself.
 - **Tier words resolve against each harness's own catalog** (codex:
@@ -357,10 +372,10 @@ grok 1.0.62:
   prepended at the spawn boundary (no equivalent flag). `prompt.md` in the
   job dir records the CALLER's content only (prompt + evidence block), never
   the preamble — symmetric records regardless of transport.
-- **The evidence read is cat-like.** A prompt argument plus a piped-but-open
-  stdin blocks until EOF, exactly like `cat`. Real shells close their pipes;
-  programmatic spawners must too (the fleet always has; the suite's
-  spawn-based tests learned this the hard way).
+- **The evidence read is cat-like for pipes and files.** A prompt argument
+  plus a piped-but-open stdin blocks until EOF, exactly like `cat`. Real
+  shells close their pipes; programmatic spawners must too (the fleet always
+  has). A socket stdin is the exception, below.
 - **`GASLAMP_ALLOWED_TOOLS` splits on commas when a comma is present**,
   legacy whitespace otherwise — entries like `Bash(git diff:*)` carry spaces,
   and the old `/[\s,]+/` split would shred them (caught by Codex during the

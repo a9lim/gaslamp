@@ -258,6 +258,18 @@ consultee had and the ones it used, and the gaslamp version and git revision.
 Two concurrent consults into the same session would race, so gaslamp refuses
 the second (exit 5) until the first finishes.
 
+**Off-ramp records.** If the consulted harness runs the
+[end-conversation](https://github.com/a9lim/end-conversation-mcp) MCP server,
+its `end_session` tool logs to `~/.claude/conversation-ends.jsonl`, a file no
+read-only sandbox lets the consultee write. Each consult therefore sets
+`END_CONVERSATION_SPOOL` to a file in the per-user temp dir, which every
+sandbox here allows. When the consult ends, gaslamp files any records there
+into that log, stamped `"via": "gaslamp <job>"`, and lists them as
+`offRamp` in `meta.json`. Only records addressed to that log are filed: the
+consultee can write the spool, so the spool doesn't get to choose where
+gaslamp appends. A consultee that calls `end_session(scope="main")` ends its
+own harness, so the consult finishes `failed`, with a stderr line saying so.
+
 ## Permissions
 
 A claude or codex consult with no `--sandbox` runs with the consulted agent's

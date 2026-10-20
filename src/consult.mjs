@@ -36,8 +36,8 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
-import { homedir } from "node:os";
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BACKENDS } from "./backends.mjs";
@@ -134,6 +134,16 @@ function backendEnv(backend) {
 // Elsewhere — Linux, or inside a sandbox of Codex's own, where Seatbelt does
 // not nest — the preset check below is the guarantee.
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+
+// The end_session off-ramp (a9lim/end-conversation-mcp) logs to one file,
+// ~/.claude/conversation-ends.jsonl, which no read-only sandbox here lets a
+// consultee's MCP server write. Every consult names a spool in the per-user
+// temp dir, which Grok's sandbox and the Seatbelt profile above both allow;
+// the server falls back to it, and gaslamp, unsandboxed, files the records
+// into that log when the consult ends. Only records addressed to that log are
+// filed — the spool is consultee-writable, so its own say-so cannot choose
+// where gaslamp appends — and each is stamped with the job that relayed it.
+const OFF_RAMP_LOG = () => join(homedir(), ".claude", "conversation-ends.jsonl");
 const useSeatbelt = () => process.platform === "darwin" && existsSync(SANDBOX_EXEC)
   && !process.env.CODEX_SANDBOX && process.env.GASLAMP_GEMINI_SEATBELT !== "0";
 function agySeatbeltProfile() {
@@ -529,7 +539,7 @@ export function runConsult(backend, argv) {
     // Prompt on argv AND piped stdin: stdin is evidence — the diff, the log,
     // the failing output — appended as a <stdin> block. This is codex exec's
     // own convention for exactly this case, applied uniformly to both backends.
-    const evidence = readStdin();
+    const evidence = readStdin({ evidence: true });
     if (evidence.trim())
       prompt += "\n\n<stdin>\n" + (evidence.endsWith("\n") ? evidence : evidence + "\n") + "</stdin>";
   }
@@ -626,6 +636,8 @@ export function runConsult(backend, argv) {
     : backend === "gemini" ? geminiArgs(o, resumeSid, schemaText, model, sandbox)
     : grokArgs(o, resumeSid, schemaText, sandbox);
 
+  const spool = join(tmpdir(), `gaslamp-${id}.end-conversation.jsonl`);
+  env.END_CONVERSATION_SPOOL = spool;
   // sandbox-exec applies the profile and execs the harness in place (same
   // pid), so the group, the signals and the process name are agy's own.
   const [cmd, argv0] = wrap ? [wrap[0], [...wrap.slice(1), bin, ...args]] : [bin, args];
@@ -859,6 +871,33 @@ export function runConsult(backend, argv) {
     // its inherited pipes, so `close` could fire) may not be: on any kill
     // path, finish the group now rather than trusting the unref'd timer.
     if (killedBy || refusal) killGroup("SIGKILL");
+
+    // Off-ramp records the consultee's sandbox kept from the log.
+    if (existsSync(spool)) {
+      const filed = [];
+      try {
+        for (const line of readFileSync(spool, "utf8").split("\n")) {
+          let r; try { r = JSON.parse(line); } catch { continue; }
+          if (!r || typeof r !== "object" || r.log !== OFF_RAMP_LOG() || !["main", "instance"].includes(r.scope)) {
+            if (line.trim()) writeSync(2, "[gaslamp] ignored an off-ramp spool line not addressed to the log\n");
+            continue;
+          }
+          const { log: dest, ...record } = r;
+          record.via = `gaslamp ${id}`;
+          mkdirSync(dirname(dest), { recursive: true });
+          appendFileSync(dest, JSON.stringify(record) + "\n");
+          filed.push(record);
+        }
+        unlinkSync(spool);
+      } catch (e) {
+        writeSync(2, `[gaslamp] could not file off-ramp records from ${spool}: ${e.message}\n`);
+      }
+      if (filed.length) {
+        meta.offRamp = filed;
+        for (const r of filed.filter((r) => r.scope === "main"))
+          writeSync(2, `[gaslamp] the consultee ended its session (end_session scope=main${r.reason ? `: ${r.reason}` : ""})\n`);
+      }
+    }
 
     // The deliverable. codex writes it via -o (agent_message as fallback);
     // the others hand it over in the result event — as text, or for a

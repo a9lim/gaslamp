@@ -136,6 +136,8 @@ Agreement across vendors is not automatically independent confirmation — the m
 
 Every consult writes through to ~/.gaslamp/jobs/<id>/ and its session is recorded within seconds — a killed consult costs the in-flight turn, not the session. Recover with \`--resume <session|job>\` or the thread name.
 
+A consultee may end its own session through the end_session off-ramp, if its harness runs that MCP server. \`scope="main"\` stops it and deletes its transcript after it exits, so the consult finishes failed (a stderr line says so) and that session can't be resumed. Either way the record lands in ~/.claude/conversation-ends.jsonl, even from inside a sandbox, and in the job's \`offRamp\`.
+
 ## Knobs
 
 \`--model\`, \`--effort\`, \`--sandbox\` (omit to use ${Other}'s own config), \`--label\` (tags the job record), \`--raw\` (drop the consult preamble), \`--cwd\`. Exit codes: 0 ok, 1 failed/killed, 2 usage, 3 nested (one-hop), 4 no network, 5 session busy.
