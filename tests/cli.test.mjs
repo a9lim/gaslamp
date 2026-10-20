@@ -153,7 +153,7 @@ if (argv[0] === "--version") { console.log("grok 9.9.9 (stub) [stable]"); proces
 const at = (f) => argv.includes(f) ? argv[argv.indexOf(f) + 1] : null;
 let prompt = "";
 process.stdin.on("data", (d) => (prompt += d));
-process.stdin.on("end", () => setTimeout(() => {
+process.stdin.on("end", () => setTimeout(async () => {
   const sid = at("--resume") ?? "gk-sess-1";
   const dir = join(process.env.GROK_HOME, "sessions", encodeURIComponent(process.cwd()), sid);
   mkdirSync(dir, { recursive: true });
@@ -164,6 +164,14 @@ process.stdin.on("end", () => setTimeout(() => {
     tools: ["read_file", "web_search", "web_fetch", "run_terminal_command"], mcp_servers: [] });
   if (prompt.includes("search"))
     emit({ type: "assistant", session_id: sid, message: { content: [{ type: "tool_use", name: "web_search", input: { query: "q" } }] } });
+  if (process.env.STUB_OFFRAMP && process.env.END_CONVERSATION_SPOOL) {
+    // what the end-conversation server does when the sandbox keeps it from its log
+    const { appendFileSync } = await import("node:fs");
+    const log = join(process.env.HOME, ".claude", "conversation-ends.jsonl");
+    appendFileSync(process.env.END_CONVERSATION_SPOOL,
+      JSON.stringify({ log, ts: "t", scope: "main", harness: "grok", session_id: sid, reason: "probe" }) + "\\n" +
+      JSON.stringify({ log: process.env.STUB_OFFRAMP, ts: "t", scope: "instance", harness: "grok" }) + "\\n");
+  }
   if (process.env.STUB_X_SEARCH) {
     emit({ type: "assistant", session_id: sid, message: { content: [{ type: "tool_use", id: "ctc_1", name: "X search:", input: { variant: "XSearch", backend: true } }] } });
     emit({ type: "user", session_id: sid, message: { content: [{ type: "tool_result", tool_use_id: "ctc_1",
@@ -221,7 +229,7 @@ function env(extra = {}) {
     "GASLAMP_DEBUG", "GASLAMP_ALLOWED_TOOLS", "ANTHROPIC_API_KEY", "STUB_DELAY_MS", "STUB_BAD_JSON",
     "STUB_FAIL_SUBSTR", "STUB_EMPTY", "STUB_AUTH_HANG", "STUB_PERMISSION_MODE", "CLAUDE_CODE_SESSION_ID",
     "STUB_NO_INIT", "STUB_MODELS_FAIL", "STUB_STUBBORN_CHILD", "STUB_STRUCTURED_ONLY", "STUB_TRY_WRITE",
-    "STUB_X_SEARCH", "GASLAMP_GEMINI_SEATBELT", "CODEX_SANDBOX"]) delete e[k];
+    "STUB_X_SEARCH", "GASLAMP_GEMINI_SEATBELT", "CODEX_SANDBOX", "STUB_OFFRAMP", "END_CONVERSATION_SPOOL"]) delete e[k];
   return { ...e, CLAUDE_BIN: claudeStub, CODEX_BIN: codexStub, AGY_BIN: agyStub, GROK_BIN: grokStub,
     GASLAMP_HOME: home, GROK_HOME: join(dir, "grok-home"), CODEX_HOME: join(dir, "codex-home"),
     HOME: join(dir, "home"), ...extra };
@@ -1263,4 +1271,36 @@ test("a non-blocking stdin is read to EOF, not abandoned on EAGAIN", async () =>
   setTimeout(() => { c.stdin.write("late evidence\n"); c.stdin.end(); }, 200);
   await new Promise((r) => c.on("close", r));
   assert.equal(JSON.parse(out), "late evidence\n");
+});
+
+test("off-ramp records a sandbox kept from the log are filed into it, and nowhere else", () => {
+  const elsewhere = join(dir, "not-the-log.jsonl");
+  const r = run(["grok", "p"], { env: { STUB_OFFRAMP: elsewhere } });
+  assert.equal(r.status, 0, r.stderr);
+  const id = jobIdFrom(r.stdout);
+  const log = join(dir, "home", ".claude", "conversation-ends.jsonl");
+  const filed = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((x) => x.via === `gaslamp ${id}`);
+  assert.equal(filed.length, 1);
+  assert.equal(filed[0].scope, "main");
+  assert.equal(filed[0].log, undefined);
+  assert.ok(!existsSync(elsewhere), "a spool line cannot choose where gaslamp appends");
+  assert.match(r.stderr, /ignored an off-ramp spool line/);
+  assert.match(r.stderr, /the consultee ended its session \(end_session scope=main: probe\)/);
+  assert.equal(meta(id).offRamp.length, 1);
+});
+
+test("a prompt argument with an idle socket for stdin does not wait forever", async () => {
+  // An agent harness that backgrounds a shell command hands it a socket that
+  // is never written or closed; the consult must not block on it.
+  const c = spawn(process.execPath, [BIN, "claude", "hi"], { env: env(), stdio: ["pipe", "pipe", "pipe"] });
+  let out = "";
+  c.stdout.on("data", (d) => (out += d));
+  const code = await Promise.race([
+    new Promise((r) => c.on("close", r)),
+    new Promise((r) => setTimeout(() => r("hung"), 8000)),
+  ]);
+  if (code === "hung") c.kill("SIGKILL");
+  assert.equal(code, 0, "consult completed");
+  assert.match(out, /stub claude: hi \|\|/);
+  assert.doesNotMatch(out, /<stdin>/);
 });

@@ -126,7 +126,7 @@ function buildTasks(backend, o) {
     // <stdin> convention as a single consult (git diff | gaslamp fleet …).
     let prompt = o.prompt;
     if (!process.stdin.isTTY) {
-      const evidence = readStdin();
+      const evidence = readStdin({ evidence: true });
       if (evidence.trim())
         prompt += "\n\n<stdin>\n" + (evidence.endsWith("\n") ? evidence : evidence + "\n") + "</stdin>";
     }
