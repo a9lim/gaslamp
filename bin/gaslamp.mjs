@@ -120,6 +120,8 @@ Env knobs:
   GASLAMP_DEBUG            verbose stderr (spawn argv)
   CLAUDE_BIN / CODEX_BIN / AGY_BIN / GROK_BIN
                            backend binaries (autodetected otherwise)
+  GASLAMP_GEMINI_SEATBELT  0 = read-only gemini consults rely on Antigravity's
+                           preset check instead of Seatbelt (macOS default)
 
 Every job record (meta.json) carries provenance: provider, harness version,
 the model the backend reported (or unknown), the vendor system prompt's hash

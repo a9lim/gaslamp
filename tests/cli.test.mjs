@@ -103,7 +103,7 @@ if (process.env.STUB_AUTH_HANG === "unterminated") {
 } else {
   let input = "";
   process.stdin.on("data", (d) => (input += d));
-  process.stdin.on("end", () => setTimeout(() => {
+  process.stdin.on("end", () => setTimeout(async () => {
     let content = JSON.parse(input.trim().split("\\n")[0]).message.content;
     const pre = content.startsWith("<gaslamp_consult>\\n");
     if (pre) content = content.replace(/^<gaslamp_consult>\\n[\\s\\S]*?\\n<\\/gaslamp_consult>\\n\\n/, "");
@@ -120,13 +120,18 @@ if (process.env.STUB_AUTH_HANG === "unterminated") {
         tool_name: "search_web", tool_info: { name: "search_web", parameters: { query: "q" } } } });
     emit({ event: "step_update", step_update: { conversation_id: cid, step_index: 2, state: "DONE", step_type: "agent_response",
       usage: { input_tokens: 700, output_tokens: 30, thinking_tokens: 5, cache_read_tokens: 100, total_tokens: 730 } } });
+    let wrote = "";
+    if (process.env.STUB_TRY_WRITE) {
+      const { writeFileSync } = await import("node:fs");
+      try { writeFileSync("stub-wrote.txt", "x"); wrote = " || write=ok"; } catch (e) { wrote = " || write=" + e.code; }
+    }
     if (process.env.STUB_EMPTY) process.stderr.write("jetski: no output produced — a tool required the write_file permission\\n");
     const result = { conversation_id: cid, status: "SUCCESS", num_turns: 1,
       // cumulative over the conversation: gaslamp must not take this as the job's usage
       usage: { input_tokens: 99999, output_tokens: 9999 },
       response: process.env.STUB_EMPTY ? "" : "stub gemini: " + content + " || argv: " + JSON.stringify(argv) +
         " || preamble=" + pre + " || nested=" + (process.env.GASLAMP_NESTED || "") +
-        " || claudeSid=" + ("CLAUDE_CODE_SESSION_ID" in process.env) };
+        " || claudeSid=" + ("CLAUDE_CODE_SESSION_ID" in process.env) + wrote };
     if (argv.includes("--json-schema") && !process.env.STUB_BAD_JSON) {
       result.response = JSON.stringify({ ok: true, who: "gemini" });
       result.structured_output = { ok: true, who: "gemini" };
@@ -159,6 +164,11 @@ process.stdin.on("end", () => setTimeout(() => {
     tools: ["read_file", "web_search", "web_fetch", "run_terminal_command"], mcp_servers: [] });
   if (prompt.includes("search"))
     emit({ type: "assistant", session_id: sid, message: { content: [{ type: "tool_use", name: "web_search", input: { query: "q" } }] } });
+  if (process.env.STUB_X_SEARCH) {
+    emit({ type: "assistant", session_id: sid, message: { content: [{ type: "tool_use", id: "ctc_1", name: "X search:", input: { variant: "XSearch", backend: true } }] } });
+    emit({ type: "user", session_id: sid, message: { content: [{ type: "tool_result", tool_use_id: "ctc_1",
+      content: JSON.stringify({ call_id: "xs_call-1", input: JSON.stringify({ query: "q" }), name: "x_keyword_search", id: "ctc_1" }) }] } });
+  }
   const flags = ["GROK_CLAUDE_AGENTS_ENABLED", "GROK_CLAUDE_HOOKS_ENABLED", "GROK_CURSOR_MCPS_ENABLED"]
     .map((k) => k + "=" + process.env[k]).join(",");
   const result = { type: "result", subtype: "success", is_error: false, session_id: sid,
@@ -210,7 +220,8 @@ function env(extra = {}) {
   for (const k of ["GASLAMP_NESTED", "GASLAMP_ALLOW_RECURSION", "GASLAMP_FLEET", "CODEX_SANDBOX_NETWORK_DISABLED",
     "GASLAMP_DEBUG", "GASLAMP_ALLOWED_TOOLS", "ANTHROPIC_API_KEY", "STUB_DELAY_MS", "STUB_BAD_JSON",
     "STUB_FAIL_SUBSTR", "STUB_EMPTY", "STUB_AUTH_HANG", "STUB_PERMISSION_MODE", "CLAUDE_CODE_SESSION_ID",
-    "STUB_NO_INIT", "STUB_MODELS_FAIL", "STUB_STUBBORN_CHILD", "STUB_STRUCTURED_ONLY"]) delete e[k];
+    "STUB_NO_INIT", "STUB_MODELS_FAIL", "STUB_STUBBORN_CHILD", "STUB_STRUCTURED_ONLY", "STUB_TRY_WRITE",
+    "STUB_X_SEARCH", "GASLAMP_GEMINI_SEATBELT", "CODEX_SANDBOX"]) delete e[k];
   return { ...e, CLAUDE_BIN: claudeStub, CODEX_BIN: codexStub, AGY_BIN: agyStub, GROK_BIN: grokStub,
     GASLAMP_HOME: home, GROK_HOME: join(dir, "grok-home"), CODEX_HOME: join(dir, "codex-home"),
     HOME: join(dir, "home"), ...extra };
@@ -968,7 +979,7 @@ test("grok consult round-trips: kernel read-only sandbox, preamble as --rules, b
   assert.equal(p.permissionMode, "default");
   assert.equal(p.systemPrompt.known, true);
   assert.match(p.systemPrompt.sha256, /^[0-9a-f]{64}$/);
-  assert.deepEqual(p.retrieval, { available: ["web_search", "web_fetch"], used: [] });
+  assert.deepEqual(p.retrieval, { available: ["web_search", "web_fetch", "x_search"], used: [] });
 });
 
 test("gemini and grok spawns drop the caller's harness env; grok's vendor-compat imports are off", () => {
@@ -994,7 +1005,7 @@ test("--sandbox maps honestly for the newcomers", () => {
 });
 
 test("a read-only gemini consult refuses a harness reporting a laxer permission mode", () => {
-  const r = run(["gemini", "p"], { env: { STUB_PERMISSION_MODE: "always-proceed", STUB_DELAY_MS: "3000" } });
+  const r = run(["gemini", "p"], { env: { STUB_PERMISSION_MODE: "always-proceed", STUB_DELAY_MS: "3000", GASLAMP_GEMINI_SEATBELT: "0" } });
   assert.equal(r.status, 1);
   assert.match(r.stderr, /permission mode "always-proceed", not request-review/);
   const m = meta(jobIdFrom(r.stdout));
@@ -1099,31 +1110,33 @@ const agySettings = (obj) => {
   writeFileSync(join(d, "settings.json"), JSON.stringify(obj));
 };
 
-test("a read-only gemini consult refuses settings that would let it act unprompted", () => {
+test("without Seatbelt, a read-only gemini consult refuses settings that would let it act unprompted", () => {
+  const run0 = (args, opts = {}) => run(args, { ...opts, env: { GASLAMP_GEMINI_SEATBELT: "0", ...opts.env } });
   try {
     agySettings({ permissions: { allow: ["command(git diff)", "mcp(end-conversation/*)", "read_file(/var/log)"] } });
-    const ok = run(["gemini", "p"]);
+    const ok = run0(["gemini", "p"]);
     assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(meta(jobIdFrom(ok.stdout)).provenance.enforcement, "agy request-review preset");
     assert.deepEqual(meta(jobIdFrom(ok.stdout)).provenance.grants,
       ["command(git diff)", "mcp(end-conversation/*)", "read_file(/var/log)"]);
 
     agySettings({ permissions: { allow: ["command(git diff)", "write_file(src/)"] } });
-    const w = run(["gemini", "p"]);
+    const w = run0(["gemini", "p"]);
     assert.equal(w.status, 1);
     assert.match(w.stderr, /write_file\(src\/\)/);
     assert.doesNotMatch(w.stdout, /stub gemini/, "never spawned");
 
     agySettings({ toolPermission: "always-proceed" });
-    assert.match(run(["gemini", "p"]).stderr, /toolPermission "always-proceed"/);
+    assert.match(run0(["gemini", "p"]).stderr, /toolPermission "always-proceed"/);
 
     // auto mode approves edits and commands under a request-review preset,
     // and init does not report it
     agySettings({ toolPermission: "request-review", agentMode: "auto" });
-    const a = run(["gemini", "p"]);
+    const a = run0(["gemini", "p"]);
     assert.equal(a.status, 1);
     assert.match(a.stderr, /agentMode "auto"/);
     agySettings({ artifactReviewPolicy: "always-proceed" });
-    assert.equal(run(["gemini", "p"]).status, 0, "artifact review alone does not open writes");
+    assert.equal(run0(["gemini", "p"]).status, 0, "artifact review alone does not open writes");
 
     // the escape hatch is explicit
     assert.equal(run(["gemini", "--sandbox", "danger-full-access", "p"]).status, 0);
@@ -1132,8 +1145,8 @@ test("a read-only gemini consult refuses settings that would let it act unprompt
   }
 });
 
-test("a read-only gemini consult without a confirming init event fails", () => {
-  const r = run(["gemini", "p"], { env: { STUB_NO_INIT: "1" } });
+test("without Seatbelt, a read-only gemini consult without a confirming init event fails", () => {
+  const r = run(["gemini", "p"], { env: { STUB_NO_INIT: "1", GASLAMP_GEMINI_SEATBELT: "0" } });
   assert.equal(r.status, 1);
   const m = meta(jobIdFrom(r.stdout));
   assert.equal(m.status, "failed");
@@ -1153,10 +1166,10 @@ test("grants in the app-shared and per-project permission files count too", () =
   mkdirSync(join(cfg, "projects"), { recursive: true });
   try {
     writeFileSync(join(cfg, "config.json"), JSON.stringify({ userSettings: { permissions: { allow: ["command(npm test)"] } } }));
-    assert.match(run(["gemini", "p"]).stderr, /command\(npm test\) \(.*config\.json\)/);
+    assert.match(run(["gemini", "p"], { env: { GASLAMP_GEMINI_SEATBELT: "0" } }).stderr, /command\(npm test\) \(.*config\.json\)/);
     writeFileSync(join(cfg, "config.json"), "{}");
     writeFileSync(join(cfg, "projects", "p1.json"), JSON.stringify({ id: "p1", permissions: { allow: ["unsandboxed(*)"] } }));
-    assert.match(run(["gemini", "p"]).stderr, /unsandboxed\(\*\) \(.*p1\.json\)/);
+    assert.match(run(["gemini", "p"], { env: { GASLAMP_GEMINI_SEATBELT: "0" } }).stderr, /unsandboxed\(\*\) \(.*p1\.json\)/);
   } finally {
     rmSync(cfg, { recursive: true, force: true });
   }
@@ -1204,4 +1217,50 @@ test("a consult's record goes from running straight to its final state", async (
   }
   seen.add(meta(id).status);
   assert.deepEqual([...seen].filter((x) => x !== "running"), ["failed"]);
+});
+
+// ---- read-only by kernel sandbox; X search; non-blocking stdin ------------------
+
+test("on macOS a read-only gemini consult runs under Seatbelt, whatever agy's settings say", { skip: process.platform !== "darwin" }, () => {
+  let cwd;
+  try {
+    agySettings({ toolPermission: "always-proceed", agentMode: "auto", permissions: { allow: ["write_file(*)"] } });
+    // outside the temp dirs, which the profile leaves writable
+    cwd = mkdtempSync(join(ROOT, ".seatbelt-test-"));
+    const r = run(["gemini", "--cwd", cwd, "p"], { env: { STUB_TRY_WRITE: "1" } });
+    assert.equal(r.status, 0, r.stderr);
+    // the consultee's write into the workspace was refused by the kernel
+    assert.match(r.stdout, /write=EPERM/);
+    assert.ok(!existsSync(join(cwd, "stub-wrote.txt")));
+    const p = meta(jobIdFrom(r.stdout)).provenance;
+    assert.equal(p.enforcement, "seatbelt (sandbox-exec)");
+    assert.deepEqual(p.agySettings, ["toolPermission always-proceed", "agentMode auto"]);
+    // danger-full-access runs without it
+    const w = run(["gemini", "--cwd", cwd, "--sandbox", "danger-full-access", "p"], { env: { STUB_TRY_WRITE: "1" } });
+    assert.match(w.stdout, /write=ok/);
+  } finally {
+    agySettings({});
+    if (cwd) rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("grok's backend X search lands in retrieval provenance, available and used", () => {
+  const r = run(["grok", "p"], { env: { STUB_X_SEARCH: "1" } });
+  assert.equal(r.status, 0, r.stderr);
+  const p = meta(jobIdFrom(r.stdout)).provenance;
+  assert.deepEqual(p.retrieval.available, ["web_search", "web_fetch", "x_search"]);
+  assert.deepEqual(p.retrieval.used, ["x_search", "x_keyword_search"]);
+});
+
+test("a non-blocking stdin is read to EOF, not abandoned on EAGAIN", async () => {
+  // Touching process.stdin makes fd 0 non-blocking; readFileSync(0) then
+  // threw EAGAIN instead of waiting for the evidence.
+  const code = `process.stdin; process.stdin.pause(); import(${JSON.stringify(join(ROOT, "src", "stdin.mjs"))})` +
+    `.then((m) => process.stdout.write(JSON.stringify(m.readStdin())))`;
+  const c = spawn(process.execPath, ["-e", code], { stdio: ["pipe", "pipe", "inherit"] });
+  let out = "";
+  c.stdout.on("data", (d) => (out += d));
+  setTimeout(() => { c.stdin.write("late evidence\n"); c.stdin.end(); }, 200);
+  await new Promise((r) => c.on("close", r));
+  assert.equal(JSON.parse(out), "late evidence\n");
 });

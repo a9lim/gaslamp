@@ -43,6 +43,7 @@ import {
 } from "./jobs.mjs";
 import { BACKEND_NAMES, isBackend } from "./backends.mjs";
 import { readThread } from "./threads.mjs";
+import { readStdin } from "./stdin.mjs";
 
 const GASLAMP_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "gaslamp.mjs");
 // Quota-shaped, not CPU-shaped: the bottleneck is API rate limits, not cores
@@ -116,7 +117,7 @@ function buildTasks(backend, o) {
   let raw;
   const stdinRequested = o.stdin || (o.prompt == null && !process.stdin.isTTY);
   if (stdinRequested) {
-    const lines = readFileSync(0, "utf8").split("\n").map((l) => l.trim()).filter(Boolean);
+    const lines = readStdin().split("\n").map((l) => l.trim()).filter(Boolean);
     if (!lines.length) die(2, "no tasks on stdin");
     raw = lines.map((line, i) => norm(line.startsWith("{") ? parseJsonLine(line, i) : line, i));
   } else {
@@ -125,7 +126,7 @@ function buildTasks(backend, o) {
     // <stdin> convention as a single consult (git diff | gaslamp fleet …).
     let prompt = o.prompt;
     if (!process.stdin.isTTY) {
-      const evidence = readFileSync(0, "utf8");
+      const evidence = readStdin();
       if (evidence.trim())
         prompt += "\n\n<stdin>\n" + (evidence.endsWith("\n") ? evidence : evidence + "\n") + "</stdin>";
     }

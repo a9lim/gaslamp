@@ -175,7 +175,20 @@ grok 1.0.62:
   `request-review`), and the turn then ended `SUCCESS` with an empty
   `response` plus a stderr notice. Hence no workspace-write, and empty reply
   ⇒ failed (a structured-only `--schema` result counts as a reply).
-- **agy's read-only is the preset plus no standing grants.** Allow rules in
+- **On macOS, agy's read-only is Seatbelt.** Antigravity's permission
+  settings can't be overridden per run (a project file pinning Request Review
+  was ignored; a separate HOME loses the keychain sign-in), and users keep
+  them lax for interactive work. So a read-only gemini consult runs
+  `sandbox-exec -p <profile> agy …`: writes allowed only to
+  `~/.gemini/antigravity-cli` (conversations, logs, caches — every state
+  write a probe saw) and temp dirs, with that directory's settings.json,
+  keybindings.json, rules/, plugins/, skills/ and updater/ denied again (the
+  later SBPL rule wins). bin/ must stay writable: agy extracts
+  bin/agentapi before every shell command, and denying it broke all of them.
+  sandbox-exec execs in place, so the pid, group and process name are agy's.
+  Probed live under always-proceed + auto: search_web and `git diff` ran,
+  `write_file` and `touch` failed with EPERM, conversations resumed.
+- **Elsewhere, agy's read-only is the preset plus no standing grants.** Allow rules in
   its permission files (CLI `settings.json`, the app-shared
   `config/config.json`, every `config/projects/*.json`) run unprompted under
   request-review, so before spawning, a read-only gemini consult refuses any
@@ -218,6 +231,11 @@ grok 1.0.62:
   Cursor's likewise. Consults set `GROK_{CLAUDE,CURSOR}_*_ENABLED=0`.
   `~/.claude/settings.json` permissions are read with no switch; the explicit
   `--permission-mode` overrides its `defaultMode`.
+- **grok's X search is a backend tool init never lists.** A call arrives as a
+  `tool_use` named `X search:` with input `{"variant":"XSearch","backend":
+  true}`, and its `tool_result` content is a JSON string naming the tool that
+  ran (`x_keyword_search`, `x_semantic_search`). Provenance records both, and
+  lists `x_search` as available on every grok consult.
 - **grok keeps the system prompt on disk** at
   `$GROK_HOME/sessions/<urlencoded cwd>/<session>/system_prompt.txt`; its
   sha256 goes in the record, so a silent vendor prompt change shows up as a
@@ -236,6 +254,10 @@ grok 1.0.62:
   to exit with the descendant alive. Signal and refusal paths now SIGKILL the
   group on close. A consult's record also publishes one terminal state:
   empty-reply and schema checks run before `meta.json` leaves `running`.
+- **stdin may arrive non-blocking.** `readFileSync(0)` throws EAGAIN on an
+  O_NONBLOCK stdin (seen from an agent harness's shell) instead of waiting;
+  `src/stdin.mjs` loops with short naps until EOF. Reopening /dev/stdin does
+  not help on macOS (it dups the same file description).
 - **Probes get the consult's environment.** `--version` and `agy models` run
   with the same env policy as the consult itself.
 - **Tier words resolve against each harness's own catalog** (codex:
@@ -407,6 +429,7 @@ the records.
   in trailers, full-prompt fleet manifests
 - `src/threads.mjs` — named session pointers; the `threads` verb
 - `src/tail.mjs` — uniform one-line event rendering; the `tail` verb
+- `src/stdin.mjs` — read stdin to EOF even when it is non-blocking
 - `src/setup.mjs` — allowlist the command (`addAllow` helper); `--local` pins
   this checkout's absolute bin path; `--skill` installs the direction-aware
   SKILL.md pair for both agents
@@ -430,6 +453,7 @@ the records.
 | `GASLAMP_DEBUG` | unset | verbose stderr (spawn argv) |
 | `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN` / `GROK_BIN` | autodetected | backend binaries |
 | `GROK_HOME` | `~/.grok` | where grok keeps sessions (system prompt hash source) |
+| `GASLAMP_GEMINI_SEATBELT` | on (macOS) | `0` = read-only gemini consults use Antigravity's preset check instead of Seatbelt |
 | `CODEX_HOME` | `~/.codex` | where `setup --skill` writes Codex's skill copy |
 
 Exit codes: `0` reply delivered (fleet: all consults done) · `1` consult
