@@ -41,6 +41,7 @@ import {
   createFleet, liveStatus, looksLikeFleetId, newFleetId, readFleetMeta,
   readManifest, readMeta, readReply, writeFleetMeta,
 } from "./jobs.mjs";
+import { BACKEND_NAMES, isBackend } from "./backends.mjs";
 import { readThread } from "./threads.mjs";
 
 const GASLAMP_BIN = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "gaslamp.mjs");
@@ -292,8 +293,8 @@ function renderBlock(backend, r) {
 
 export async function runFleet(backend, argv) {
   if (backend === "--resume") return runFleetResume(argv[0] ?? null, argv.slice(1));
-  if (backend !== "claude" && backend !== "codex")
-    die(2, `fleet needs a backend: gaslamp fleet <claude|codex|--resume fl-…> … (got "${backend ?? ""}")`);
+  if (!isBackend(backend))
+    die(2, `fleet needs a backend: gaslamp fleet <${BACKEND_NAMES.join("|")}|--resume fl-…> … (got "${backend ?? ""}")`);
 
   const o = parseArgs(argv);
   guards();

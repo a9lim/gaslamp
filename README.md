@@ -6,7 +6,8 @@
 [![node](https://img.shields.io/node/v/gaslamp)](https://www.npmjs.com/package/gaslamp)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
 
-Let Claude Code and Codex consult each other from the shell.
+Let Claude Code and Codex consult each other from the shell — and reach Gemini
+and Grok as read-only consult targets.
 
 ```sh
 gaslamp codex  "review this diff for races: …"     # Claude asks Codex
@@ -14,6 +15,8 @@ gaslamp claude "verify this proof sketch: …"       # Codex asks Claude
 git diff | gaslamp codex "review for races:"       # piped stdin rides as evidence
 gaslamp codex - < notes/design-spar.md             # or: the whole prompt from a file
 gaslamp claude --thread api-spar "counterpoint: …" # named session, continued
+gaslamp gemini "is this migration reversible? …"   # Gemini via Antigravity CLI
+gaslamp grok "what does this stack trace mean? …"  # Grok via Grok Build
 ```
 
 Each call blocks until the reply, then prints it plus a greppable trailer:
@@ -38,7 +41,10 @@ gaslamp stays a thin wrapper around `claude -p` / `codex exec`.
 ## Requirements
 
 Both CLIs installed and logged in: [Claude Code](https://code.claude.com/docs)
-and [Codex](https://developers.openai.com/codex). Node ≥ 18.
+and [Codex](https://developers.openai.com/codex). Node ≥ 18. For the other two
+targets, [Antigravity CLI](https://antigravity.google/docs/cli/headless/)
+(`agy`, signed in once interactively) and/or
+[Grok Build](https://docs.x.ai/build/overview) (`grok login`).
 
 ## Install
 
@@ -93,6 +99,8 @@ cd gaslamp
 ```
 gaslamp claude [opts] <prompt|->   Consult Claude (blocks until the reply).
 gaslamp codex  [opts] <prompt|->   Consult Codex  (blocks until the reply).
+gaslamp gemini [opts] <prompt|->   Consult Gemini through Antigravity CLI (agy).
+gaslamp grok   [opts] <prompt|->   Consult Grok through Grok Build.
 gaslamp fleet <backend> [opts]     Fan out a fleet of consults in one command.
 gaslamp fleet --resume <fleet-id>  Finish an interrupted fleet.
 gaslamp jobs [-n N] [--json]       List consult records, newest first.
@@ -105,12 +113,17 @@ gaslamp setup [--local] [--skill]  Allowlist the command; --skill installs the
 Consult options:
   --resume <session|job>   Continue a session (a prior job id works too).
   --thread <name>          Named session: continue if bound, else start + bind.
-  --model <m>              Backend model override.
-  --effort <level>         Reasoning effort (native on both backends).
+  --model <m>              An exact model id, or a tier word: claude's own
+                           aliases (fable, opus, sonnet, haiku); codex tiers
+                           (astra, sol, luna) and gemini tiers (argon, flash)
+                           resolve to the newest id in that harness's catalog.
+  --effort <level>         Reasoning effort (native on every backend).
   --schema <file|json>     JSON Schema for the reply; --json gains data.
   --label <s>              Tag the job record (shows in gaslamp jobs).
   --sandbox <mode>         claude: read-only | danger-full-access
                            codex:  read-only | workspace-write | danger-full-access
+                           gemini: read-only | danger-full-access
+                           grok:   read-only | workspace-write | danger-full-access
   --raw                    Skip the consult preamble.
   --cwd <dir>              Working directory for the consult.
   --json                   {backend, jobId, sessionId, status, exitCode,
@@ -232,15 +245,24 @@ Token usage lands in the record too (claude's result usage + cost; codex's
 per-turn usage, summed) and shows in the trailer — fleets are quota-shaped,
 so quota is visible. `gaslamp jobs --json` and `gaslamp poll <id> --json`
 make the records scriptable; `gaslamp tail <job|--last>` follows a running
-consult's events as uniform one-liners across both backends' schemas.
+consult's events as uniform one-liners across every backend's schema.
+
+Each record also carries **provenance**, because a vendor can change the model
+or the system prompt behind a stable product name: the provider and harness
+version, the model the backend reported answering with (`unknown` where it
+reports none — codex), the tier word and the id actually passed, the
+permission mode and effective sandbox, a hash of the vendor system prompt where
+the harness exposes one (grok) or `known: false`, the web/X retrieval tools the
+consultee had and the ones it used, and the gaslamp version and git revision.
 
 Two concurrent consults into the same session would race, so gaslamp refuses
 the second (exit 5) until the first finishes.
 
 ## Permissions
 
-A consult with no `--sandbox` runs with the consulted agent's own config —
-exactly as that agent would behave if you drove it yourself. Overrides:
+A claude or codex consult with no `--sandbox` runs with the consulted agent's
+own config — exactly as that agent would behave if you drove it yourself.
+(Gemini and Grok consults default to read-only instead; see below.) Overrides:
 `read-only` forces an advisory, no-edit reviewer on either backend;
 `danger-full-access` forces full read/write. Claude has no filesystem
 sandbox, so `workspace-write` there is a usage error rather than a silent
@@ -253,6 +275,45 @@ reach neither Anthropic nor OpenAI — gaslamp detects this
 (`CODEX_SANDBOX_NETWORK_DISABLED=1`) and refuses with instructions instead of
 timing out. Grant the call escalated permissions, or set
 `network_access = true` / `danger-full-access` in `~/.codex/config.toml`.
+
+## Gemini and Grok
+
+`gaslamp gemini` drives Google's Antigravity CLI (`agy`) in print mode, the
+prompt on stdin as one streaming-input event; `gaslamp grok` drives xAI's Grok
+Build headless, prompt on stdin, `--output-format streaming-messages-json`.
+Same contract as the other two — blocking call, trailer, job records,
+threads, `--schema`, fleets — with these differences:
+
+- **Read-only by default, enforced by the harness.** Grok runs under its
+  kernel sandbox (`--sandbox read-only`: Seatbelt on macOS, Landlock on Linux;
+  writes only to `~/.grok` and temp dirs). Grok's permission layer is not a
+  substitute: headless `--permission-mode default` denied its write tool but
+  ran an arbitrary shell `touch`. Antigravity's print mode soft-denies file
+  writes, shell commands and URL fetches under its default `request-review`
+  preset; standing allow rules in its permission files would run
+  unprompted, so a read-only consult refuses to start when they grant more
+  than reads, read-only git and the end_session off-ramp, and fails if the
+  harness doesn't confirm the preset in its init event.
+  Antigravity has no headless `workspace-write` (`--mode accept-edits` did
+  not enable writes in print mode), so that is a usage error there.
+- **A denied tool call can end the turn empty.** Both harnesses report success
+  for it; gaslamp marks an empty reply failed and surfaces the harness's
+  stderr. Pipe evidence in rather than asking the consultee to fetch it.
+- **Gemini is pinned.** Antigravity also serves Claude and GPT-OSS models under
+  the same account; without `--model`, a gemini consult runs the newest
+  `argon` tier, never the account default.
+- **The caller's harness stays home.** Their spawns drop `CLAUDE*`,
+  `ANTHROPIC_*`, `CODEX_*` and `OPENAI_*` variables (session ids, a messaging
+  token, account details), and Grok's vendor-compat imports are switched off
+  for the consult: by default Grok loads `~/.claude/CLAUDE.md` as its own
+  instructions and runs Claude's skills, MCP servers and hooks. (It also reads
+  `~/.claude/settings.json` permissions with no switch; gaslamp's explicit
+  `--permission-mode` overrides that file's `defaultMode`.)
+- **Unsigned `agy` hangs.** Without a cached sign-in, print mode prints a
+  sign-in URL and waits forever; gaslamp stops it and says to run `agy` once.
+- **Sessions.** `agy --conversation <id>` resumes in place (same id); so does
+  `grok --resume <id>`. Usage comes from Antigravity's per-step events, since
+  its result event counts the whole conversation.
 
 ## Recursion
 
@@ -270,7 +331,8 @@ it. This is loop prevention, not a security boundary. Set
 | `GASLAMP_ALLOWED_TOOLS` | `Read,Grep,Glob,WebFetch,WebSearch` + read-only git (`Bash(git diff:*)` etc) | tools the claude `read-only` override permits, comma-separated |
 | `GASLAMP_ALLOW_RECURSION` | unset | allow consulted agents to consult back |
 | `GASLAMP_DEBUG` | unset | verbose stderr (spawn argv) |
-| `CLAUDE_BIN` / `CODEX_BIN` | autodetected | backend binaries |
+| `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN` / `GROK_BIN` | autodetected | backend binaries |
+| `GROK_HOME` | `~/.grok` | where grok keeps sessions (the system prompt hash is read from there) |
 | `CODEX_HOME` | `~/.codex` | where `setup --skill` puts Codex's copy |
 
 Exit codes: `0` ok · `1` consult failed/killed · `2` usage · `3` nested
@@ -280,7 +342,7 @@ still running.
 ## Development
 
 ```sh
-npm test                # node --test against stub claude and codex binaries
+npm test                # node --test against stub claude, codex, agy and grok binaries
 npm run check           # node -c syntax check on every source file
 ```
 

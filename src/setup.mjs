@@ -49,7 +49,7 @@ export function skillMd(other) {
     : "Run a consult in your background terminal and check back between steps — several can run in parallel.";
   return `---
 name: gaslamp
-description: Consult ${Other} (the other coding agent) from the shell for a second pair of eyes — verify a fix or proof, spar on a design, review a diff, diagnose with fresh context — or fan out a fleet of parallel consults. Use when work would benefit from an independent take, when a claim deserves adversarial checking before you rely on it, or when explicitly asked to consult ${Other} / get a second opinion / hand work off.
+description: Consult ${Other} (the other coding agent) from the shell for a second pair of eyes — verify a fix or proof, spar on a design, review a diff, diagnose with fresh context — or fan out a fleet of parallel consults. Also reaches Gemini and Grok as read-only consult targets. Use when work would benefit from an independent take, when a claim deserves adversarial checking before you rely on it, or when explicitly asked to consult ${Other} / Gemini / Grok / get a second opinion / hand work off.
 ---
 
 # Consulting ${Other} via gaslamp
@@ -91,17 +91,16 @@ Fleets default to \`--sandbox read-only\` (N writers in one cwd race) — pass \
 
 ## Picking a model
 
-Both ladders, strongest first: fable ≈ astra > opus ≈ sol > terra > sonnet ≈ luna > haiku.
+Both ladders, strongest first: fable ≈ astra > opus ≈ sol > sonnet ≈ luna > haiku.
 
 ${other === "codex"
-    ? `Codex tiers — pass the full id to \`--model\` (bare tier names are rejected):
+    ? `Codex tiers — \`--model\` takes the tier word. Codex itself only accepts versioned ids, so gaslamp resolves the word to the newest \`gpt-<version>-<tier>\` in Codex's own model catalog; the job record's \`provenance.modelPassed\` says which:
 
-| tier | \`--model\` | ≈ claude | reach for it when |
-|------|-----------|----------|-------------------|
-| astra | \`gpt-6-astra\` | fable | the hardest reasoning: adversarial verification, design spars, proofs |
-| sol | \`gpt-5.6-sol\` | opus | substantial work: reviews, diagnosis, real implementation |
-| terra | \`gpt-5.6-terra\` | (between opus and sonnet) | everyday work: routine reviews, well-scoped changes |
-| luna | \`gpt-5.6-luna\` | sonnet | quick checks, mechanical transforms, high-N fleets |`
+| \`--model\` | ≈ claude | reach for it when |
+|-----------|----------|-------------------|
+| \`astra\` | fable | the hardest reasoning: adversarial verification, design spars, proofs |
+| \`sol\` | opus | substantial work: reviews, diagnosis, real implementation |
+| \`luna\` | sonnet | quick checks, mechanical transforms, high-N fleets |`
     : `Claude tiers — \`--model\` takes the bare alias:
 
 | \`--model\` | ≈ codex | reach for it when |
@@ -113,7 +112,21 @@ ${other === "codex"
 
 Omit \`--model\` to use ${Other}'s own configured default. Match the tier to the stakes: verification you'll rely on deserves the top tier; a fleet vote usually doesn't.
 
-\`--effort\` takes \`low\` / \`medium\` / \`high\` / \`xhigh\` / \`max\`${other === "codex" ? "; astra, sol and terra also take `ultra` (max reasoning plus automatic task delegation). Omitted = Codex's configured `model_reasoning_effort`, else the model's own default — sol's is `low`, so pass it explicitly when the consult matters." : ". Omitted = Claude's own default."}
+\`--effort\` takes \`low\` / \`medium\` / \`high\` / \`xhigh\` / \`max\`${other === "codex" ? "; astra and sol also take `ultra` (max reasoning plus automatic task delegation). Omitted = Codex's configured `model_reasoning_effort`, else the model's own default — sol's is `low`, so pass it explicitly when the consult matters." : ". Omitted = Claude's own default."}
+
+## Gemini and Grok
+
+    gaslamp gemini "<prompt>"     # Gemini, through Google's Antigravity CLI (agy)
+    gaslamp grok "<prompt>"       # Grok, through xAI's Grok Build
+
+Same contract as above — threads, \`--schema\`, fleets, records — with two differences:
+
+- **Read-only unless you say otherwise.** An omitted \`--sandbox\` means read-only, enforced by the harness: Grok runs in its kernel sandbox; Antigravity's print mode denies writes, shell commands and URL fetches, and gaslamp refuses the consult if Antigravity's settings pre-allow more than reads, read-only git and the end_session off-ramp. A denied tool call can end a turn with nothing to say, which gaslamp marks failed — so pipe the evidence in rather than asking them to go fetch it. Gemini has no \`workspace-write\`; \`danger-full-access\` exists on both.
+- **Provenance on every job.** \`meta.json\` records the model the harness reported (Grok also shows the model it billed), the harness version, a hash of the vendor system prompt where the harness exposes it (Grok) or \`known: false\`, and which web/X retrieval tools the consultee had and actually used.
+
+\`gaslamp gemini --model\` takes \`argon\` (the default) or \`flash\`, resolved to the newest \`gemini-<version>-<tier>\` in Antigravity's own catalog; Antigravity also serves Claude and GPT models under the same account, so the target always pins a Gemini unless you pass another id. \`gaslamp grok\` uses the account's default model unless \`--model\` names one (\`grok models\` lists them).
+
+Agreement across vendors is not automatically independent confirmation — the models share much of their training data, and a consultee that searched the live web or X may be repeating what it found there (check \`provenance.retrieval.used\`). Weigh a consensus by its evidence, not by the head count.
 
 ## Reading the records
 
