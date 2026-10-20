@@ -188,6 +188,12 @@ grok 1.0.62:
   sandbox-exec execs in place, so the pid, group and process name are agy's.
   Probed live under always-proceed + auto: search_web and `git diff` ran,
   `write_file` and `touch` failed with EPERM, conversations resumed.
+- **What a read-only gemini consult can still do.** Google search
+  (`search_web`) runs under Seatbelt and under request-review alike. URL
+  fetch (`read_url_content`) is listed in init but not offered to the model
+  under request-review ("my only web-specific tool is search_web"); under
+  lax settings in Seatbelt it runs. Under Seatbelt a write fails with EPERM
+  and the turn continues; only the preset path's soft-denials end it empty.
 - **Elsewhere, agy's read-only is the preset plus no standing grants.** Allow rules in
   its permission files (CLI `settings.json`, the app-shared
   `config/config.json`, every `config/projects/*.json`) run unprompted under
