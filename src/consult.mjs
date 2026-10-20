@@ -124,6 +124,10 @@ function backendEnv(backend) {
 // presence refuses the consult rather than letting "read-only" mean less.
 const AGY_READ_GRANT = /^(read_file|read_url)\(|^command\(git (diff|log|show|status)\)$|^mcp\(end-conversation\/(\*|end_session)\)$/;
 const AGY_LAX_PRESETS = new Set(["always-proceed", "proceed-in-sandbox"]);
+// agentMode "auto" approves file edits and commands itself: under it a print
+// run wrote a file and ran `touch` while init still reported request-review
+// (1.4.3), so the init check cannot see it. accept-edits is refused likewise.
+const AGY_LAX_MODES = new Set(["auto", "accept-edits"]);
 
 // Allow rules and the tool-permission preset from every file the CLI merges:
 // its settings.json, the settings shared with the Antigravity app, and the
@@ -135,20 +139,21 @@ function agyPermissionState() {
     for (const f of readdirSync(join(root, "config", "projects")))
       if (f.endsWith(".json")) files.push(join(root, "config", "projects", f));
   } catch {}
-  const grants = [], presets = [];
+  const grants = [], presets = [], modes = [];
   const walk = (node, file) => {
     if (Array.isArray(node)) return node.forEach((n) => walk(n, file));
     if (!node || typeof node !== "object") return;
     for (const [k, v] of Object.entries(node)) {
       if (k === "allow" && Array.isArray(v)) for (const r of v) if (typeof r === "string") grants.push({ rule: r, file });
       if (k === "toolPermission" && typeof v === "string") presets.push({ preset: v, file });
+      if (k === "agentMode" && typeof v === "string") modes.push({ mode: v, file });
       walk(v, file);
     }
   };
   for (const f of files) {
     try { walk(JSON.parse(readFileSync(f, "utf8")), f); } catch {}
   }
-  return { grants, presets };
+  return { grants, presets, modes };
 }
 
 // The consult preamble: the one piece of framing a consulted agent needs.
@@ -521,10 +526,13 @@ export function runConsult(backend, argv) {
   if (backend === "gemini" && sandbox === "read-only") {
     const state = agyPermissionState();
     const lax = state.presets.filter((p) => AGY_LAX_PRESETS.has(p.preset));
+    const modes = state.modes.filter((m) => AGY_LAX_MODES.has(m.mode));
     const open = state.grants.filter((g) => !AGY_READ_GRANT.test(g.rule));
-    if (lax.length || open.length)
+    if (lax.length || modes.length || open.length)
       die(1, "Antigravity's settings would let a read-only consult act unprompted — " +
-        [...lax.map((p) => `toolPermission "${p.preset}" (${p.file})`), ...open.map((g) => `${g.rule} (${g.file})`)].join(", ") +
+        [...lax.map((p) => `toolPermission "${p.preset}" (${p.file})`),
+          ...modes.map((m) => `agentMode "${m.mode}" (${m.file})`),
+          ...open.map((g) => `${g.rule} (${g.file})`)].join(", ") +
         ". Remove them, or pass --sandbox danger-full-access to consult without the guarantee.");
     grants = state.grants.map((g) => g.rule);
   }

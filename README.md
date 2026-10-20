@@ -292,7 +292,9 @@ threads, `--schema`, fleets — with these differences:
   writes, shell commands and URL fetches under its default `request-review`
   preset; standing allow rules in its permission files would run
   unprompted, so a read-only consult refuses to start when they grant more
-  than reads, read-only git and the end_session off-ramp, and fails if the
+  than reads, read-only git and the end_session off-ramp, or set a lax
+  `toolPermission` or `agentMode: auto` (which approves writes and commands
+  under any preset, unreported), and fails if the
   harness doesn't confirm the preset in its init event. Like claude's
   read-only, that is read-capable rather than airtight: an allowed
   `git diff` still accepts git's own `--output=<file>`.
