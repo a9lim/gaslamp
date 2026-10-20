@@ -293,7 +293,9 @@ threads, `--schema`, fleets — with these differences:
   preset; standing allow rules in its permission files would run
   unprompted, so a read-only consult refuses to start when they grant more
   than reads, read-only git and the end_session off-ramp, and fails if the
-  harness doesn't confirm the preset in its init event.
+  harness doesn't confirm the preset in its init event. Like claude's
+  read-only, that is read-capable rather than airtight: an allowed
+  `git diff` still accepts git's own `--output=<file>`.
   Antigravity has no headless `workspace-write` (`--mode accept-edits` did
   not enable writes in print mode), so that is a usage error there.
 - **A denied tool call can end the turn empty.** Both harnesses report success

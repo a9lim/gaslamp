@@ -631,11 +631,12 @@ export function runConsult(backend, argv) {
   // non-JSON stdout, accumulated across chunks — never protocol content,
   // where a reply may well say "authentication required".
   let initSeen = false, preInit = "";
+  const AUTH_NOTICE = /Authentication required/i;
+  const notSignedIn = () => refuse("agy is not signed in — run `agy` once in a terminal to sign in, then retry");
   const watchAuth = (text) => {
     if (backend !== "gemini" || initSeen) return;
     preInit = (preInit + text).slice(-4096);
-    if (/Authentication required/i.test(preInit))
-      refuse("agy is not signed in — run `agy` once in a terminal to sign in, then retry");
+    if (AUTH_NOTICE.test(preInit)) notSignedIn();
   };
   child.stderr.on("data", (d) => { errlog.write(d); watchAuth(d); });
 
@@ -750,6 +751,10 @@ export function runConsult(backend, argv) {
       buf = buf.slice(nl + 1);
       handleLine(line);
     }
+    // A prompt waiting for input may never end its line: look at the
+    // unterminated non-JSON tail too, without consuming it.
+    if (backend === "gemini" && !initSeen && buf && !buf.trimStart().startsWith("{")
+        && AUTH_NOTICE.test(preInit + buf)) notSignedIn();
   });
 
   // ---- signals: kill the group, finalize, no orphans --------------------------

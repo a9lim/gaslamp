@@ -91,7 +91,11 @@ if (process.env.STUB_STUBBORN_CHILD) {
   const c = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });
   writeFileSync(process.env.STUB_STUBBORN_CHILD, String(c.pid));
 }
-if (process.env.STUB_AUTH_HANG) {
+if (process.env.STUB_AUTH_HANG === "unterminated") {
+  // a prompt that never ends its line
+  process.stdout.write("Authentication required. Paste the code: ");
+  setInterval(() => {}, 1000);
+} else if (process.env.STUB_AUTH_HANG) {
   // the sign-in notice, split mid-word across writes the way a pipe may deliver it
   process.stdout.write("Authentication requ");
   setTimeout(() => process.stdout.write("ired. Please visit the URL to log in:\\n  https://accounts.google.com/o/oauth2/auth?stub\\n"), 150);
@@ -1125,6 +1129,28 @@ test("a read-only gemini consult without a confirming init event fails", () => {
   const m = meta(jobIdFrom(r.stdout));
   assert.equal(m.status, "failed");
   assert.match(m.refusal, /no init event/);
+});
+
+test("an unterminated sign-in prompt is caught too", () => {
+  const t0 = Date.now();
+  const r = run(["gemini", "p"], { env: { STUB_AUTH_HANG: "unterminated" } });
+  assert.equal(r.status, 1);
+  assert.ok(Date.now() - t0 < 8000, "refused promptly");
+  assert.match(r.stderr, /agy is not signed in/);
+});
+
+test("grants in the app-shared and per-project permission files count too", () => {
+  const cfg = join(dir, "home", ".gemini", "config");
+  mkdirSync(join(cfg, "projects"), { recursive: true });
+  try {
+    writeFileSync(join(cfg, "config.json"), JSON.stringify({ userSettings: { permissions: { allow: ["command(npm test)"] } } }));
+    assert.match(run(["gemini", "p"]).stderr, /command\(npm test\) \(.*config\.json\)/);
+    writeFileSync(join(cfg, "config.json"), "{}");
+    writeFileSync(join(cfg, "projects", "p1.json"), JSON.stringify({ id: "p1", permissions: { allow: ["unsandboxed(*)"] } }));
+    assert.match(run(["gemini", "p"]).stderr, /unsandboxed\(\*\) \(.*p1\.json\)/);
+  } finally {
+    rmSync(cfg, { recursive: true, force: true });
+  }
 });
 
 test("auth text inside a reply is content, not a sign-in prompt", () => {
