@@ -179,8 +179,11 @@ grok 1.0.62:
   its permission files (CLI `settings.json`, the app-shared
   `config/config.json`, every `config/projects/*.json`) run unprompted under
   request-review, so before spawning, a read-only gemini consult refuses any
-  grant beyond reads, read-only git and the end_session off-ramp, and any
-  lax `toolPermission`; the grants it found go in `provenance.grants`. After
+  grant beyond reads, read-only git and the end_session off-ramp, any lax
+  `toolPermission`, and `agentMode` auto or accept-edits — auto mode wrote a
+  file and ran a command under request-review while init still reported
+  request-review (probed 2026-10-20; `artifactReviewPolicy: always-proceed`
+  alone did not open writes). The grants it found go in `provenance.grants`. After
   spawning, `init.permission_mode` must say request-review or strict, and a
   run that never sends init fails (Codex's review caught the gap, 2026-10-20).
 - **agy without a sign-in hangs** in print mode: it prints a Google OAuth URL

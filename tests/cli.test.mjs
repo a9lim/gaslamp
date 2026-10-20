@@ -1116,6 +1116,15 @@ test("a read-only gemini consult refuses settings that would let it act unprompt
     agySettings({ toolPermission: "always-proceed" });
     assert.match(run(["gemini", "p"]).stderr, /toolPermission "always-proceed"/);
 
+    // auto mode approves edits and commands under a request-review preset,
+    // and init does not report it
+    agySettings({ toolPermission: "request-review", agentMode: "auto" });
+    const a = run(["gemini", "p"]);
+    assert.equal(a.status, 1);
+    assert.match(a.stderr, /agentMode "auto"/);
+    agySettings({ artifactReviewPolicy: "always-proceed" });
+    assert.equal(run(["gemini", "p"]).status, 0, "artifact review alone does not open writes");
+
     // the escape hatch is explicit
     assert.equal(run(["gemini", "--sandbox", "danger-full-access", "p"]).status, 0);
   } finally {
