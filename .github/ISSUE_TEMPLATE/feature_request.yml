@@ -32,9 +32,9 @@ body:
     attributes:
       label: Which surface does this touch?
       options:
-        - consult engine (sandbox mapping, auth, session/resume, signals)
-        - fleet (fan-out, concurrency, manifest)
-        - CLI subcommand (jobs / poll / setup / new)
+        - consult engine (sandboxes, auth, conversations, signals)
+        - CLI subcommand (jobs / poll / threads / setup / new)
+        - the skill
         - docs only
         - other
     validations:

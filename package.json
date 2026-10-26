@@ -1,7 +1,7 @@
 {
   "name": "gaslamp",
-  "version": "2.2.3",
-  "description": "Let Claude Code and Codex consult each other from the shell, and consult Gemini and Grok.",
+  "version": "3.0.0",
+  "description": "Let coding agents consult each other from the shell: Claude, Codex, Gemini and Grok.",
   "type": "module",
   "bin": {
     "gaslamp": "bin/gaslamp.mjs"
@@ -9,6 +9,7 @@
   "files": [
     "bin/",
     "src/",
+    "skill/",
     "README.md",
     "LICENSE"
   ],

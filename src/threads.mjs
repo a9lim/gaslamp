@@ -1,12 +1,11 @@
-// threads.mjs — named session aliases: the handle you can actually remember.
+// threads.mjs — named conversations: the handle you can actually remember.
 //
-// A thread is a tiny pointer file mapping <backend, name> → session id, bound
-// the moment a fresh consult reports its session and re-pointed on every
-// consult after. `--thread spar` therefore means: continue the spar if it
-// exists, start (and bind) it if it doesn't — idempotent, no fishing UUIDs
-// out of old trailers. This matters doubly on claude, where every resume
-// forks a NEW session id: the pointer tracks the latest one automatically,
-// which manual --resume juggling cannot.
+// A thread is a tiny pointer file mapping <backend, name> → session id and
+// the directory the conversation lives in, bound the moment a fresh consult
+// reports its session and re-pointed on every consult after. `--thread spar`
+// therefore means: continue the spar if it exists, start (and bind) it if it
+// doesn't. This matters doubly on claude, where every resume forks a NEW
+// session id: the pointer tracks the latest one automatically.
 //
 // Deliberately NOT a conversation manager: one file, one pointer, no history
 // (the job records already hold that).
@@ -31,7 +30,7 @@ export function writeThread(t) {
   writeFileSync(threadPath(t.backend, t.name), JSON.stringify(t, null, 2) + "\n");
 }
 
-export function listThreads() {
+function listThreads() {
   let files;
   try { files = readdirSync(threadsDir()); } catch { return []; }
   return files.filter((f) => f.endsWith(".json"))
@@ -40,17 +39,17 @@ export function listThreads() {
     .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
 }
 
-// gaslamp threads — the named spars, latest activity first.
+// gaslamp threads — the named conversations, latest activity first.
 export function runThreads() {
   const ts = listThreads();
   if (!ts.length) { console.log(`no threads yet under ${threadsDir()} — start one with --thread <name>`); return; }
   for (const t of ts) {
     console.log([
-      String(t.name ?? "?").padEnd(24),
-      String(t.backend ?? "?").padEnd(7),
-      String(t.sessionId ?? "-").slice(0, 8).padEnd(9),
+      String(t.name ?? "?").padEnd(28),
+      String(t.backend ?? "?").padEnd(6),
       String(t.lastJobId ?? "-").padEnd(23),
-      t.updatedAt ?? "",
+      String(t.updatedAt ?? "").slice(0, 16).padEnd(16),
+      t.cwd ?? "",
     ].join(" "));
   }
 }

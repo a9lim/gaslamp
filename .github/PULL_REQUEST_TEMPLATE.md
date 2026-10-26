@@ -11,7 +11,7 @@
 - [ ] `npm test` passes
 - [ ] `npm run check` passes
 - [ ] No new runtime dependencies or a strong reason is given below
-- [ ] If this touches `src/consult.mjs`: I kept the two consult directions symmetric (OAuth key-strip, sandbox mapping, session-id capture) intact
+- [ ] If this touches `src/consult.mjs`: the four targets stay symmetric (sandbox modes, session-id capture, the reply contract)
 - [ ] If this changes a backend argv contract, the `--json` envelope, or job-record fields: I updated the tests in the same PR
 - [ ] If this is a release (version bump in `package.json`): I confirm the release workflow will publish on merge
 
