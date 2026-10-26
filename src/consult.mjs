@@ -442,11 +442,13 @@ function geminiArgs(o, model, resumeSid, schemaText) {
   return args;
 }
 
-function grokArgs(o, model, resumeSid, schemaText, sandbox) {
-  // streaming-messages-json is Anthropic's stream-json shape (system init with
-  // session_id first, result last) — the claude parser reads it. --rules
-  // appends to the system prompt: claude's --append-system-prompt.
-  const args = ["--prompt-file", "/dev/stdin", "--output-format", "streaming-messages-json", "--no-auto-update", "--rules", PREAMBLE];
+function grokArgs(o, model, resumeSid, schemaText, sandbox, promptPath) {
+  // The prompt is the job's own prompt.md: /dev/stdin can't be opened on
+  // Linux, where a child's stdio is a socket (ENXIO). streaming-messages-json
+  // is Anthropic's stream-json shape (system init with session_id first,
+  // result last), so the claude parser reads it. --rules appends to the
+  // system prompt: claude's --append-system-prompt.
+  const args = ["--prompt-file", promptPath, "--output-format", "streaming-messages-json", "--no-auto-update", "--rules", PREAMBLE];
   if (schemaText) args.push("--json-schema", schemaText);
   // The kernel sandbox is the fence, and grok's permission layer is skipped,
   // as agy's is: headless it denies whatever isn't pre-approved (under
@@ -556,7 +558,7 @@ export function runConsult(backend, argv) {
   const args = backend === "claude" ? claudeArgs(o, model, resumeSid, schemaText, sandbox, cwd)
     : backend === "codex" ? codexArgs(o, model, resumeSid, replyPath, schemaPath, sandbox)
     : backend === "gemini" ? geminiArgs(o, model, resumeSid, schemaText)
-    : grokArgs(o, model, resumeSid, schemaText, sandbox);
+    : grokArgs(o, model, resumeSid, schemaText, sandbox, join(dir, "prompt.md"));
 
   const spool = join(tmpdir(), `gaslamp-${id}.end-conversation.jsonl`);
   env.END_CONVERSATION_SPOOL = spool;
@@ -579,7 +581,7 @@ export function runConsult(backend, argv) {
   child.stdin.on("error", () => {}); // EPIPE if the child dies before reading
   const preamble = "<gaslamp_consult>\n" + PREAMBLE + "\n</gaslamp_consult>\n\n";
   if (backend === "gemini") child.stdin.write(JSON.stringify({ event: "user", message: { content: preamble + prompt } }) + "\n");
-  else child.stdin.write(backend === "codex" ? preamble + prompt : prompt);
+  else if (backend !== "grok") child.stdin.write(backend === "codex" ? preamble + prompt : prompt);
   child.stdin.end();
 
   const events = createWriteStream(join(dir, "events.jsonl"), { flags: "a" });
@@ -719,13 +721,13 @@ export function runConsult(backend, argv) {
     let status = "done", error = null;
     if (killedBy) { status = "killed"; error = `killed by ${killedBy}`; }
     else if (refusal) { status = "failed"; error = refusal; }
-    else if (code !== 0) {
+    else if (code !== 0 || resultErr) {
+      // the harness's own account first: its error field, the text of an
+      // error result, its last stderr line, and only then the exit code
       status = "failed";
+      const resultLine = resultErr ? String(resultText ?? "").trim().split("\n")[0].slice(0, 300) : "";
       error = endedSession ? "the consultee ended its session (end_session)"
-        : lastErrLine || `${backend} exited with ${code ?? signal}`;
-    } else if (resultErr) {
-      status = "failed";
-      error = backendError || String(resultText ?? "").trim().split("\n")[0].slice(0, 300) || `${backend} reported an error`;
+        : backendError || resultLine || lastErrLine || `${backend} exited with ${code ?? signal}`;
     } else if (!reply?.trim()) {
       // A turn that ended on a denied tool call, or with nothing to say, is
       // not a deliverable, whatever the harness reported.

@@ -29,7 +29,7 @@ prints.
 | claude | `claude -p --output-format stream-json --verbose --append-system-prompt <preamble> [sandbox flags] [--resume <sid>] …` (prompt on stdin) |
 | codex  | `codex exec [resume <sid>] --json -o <job>/reply.md --skip-git-repo-check -c shell_environment_policy.set.GASLAMP_NESTED="1" [-c sandbox_mode=…] … -` |
 | gemini | `[sandbox-exec -p <profile>] agy --input-format stream-json --output-format stream-json --model <gemini> --dangerously-skip-permissions [--conversation <id>] …` (one `{"event":"user"}` line on stdin) |
-| grok   | `grok --prompt-file /dev/stdin --output-format streaming-messages-json --no-auto-update --rules <preamble> --sandbox … [--resume <id>] …` |
+| grok   | `grok --prompt-file <job>/prompt.md --output-format streaming-messages-json --no-auto-update --rules <preamble> --sandbox … [--resume <id>] …` |
 
 Flow of one consult (`src/consult.mjs`):
 
@@ -242,6 +242,10 @@ JSON.
     carry the effort (`gemini-4-argon-high`), so a gemini consult always passes
     a Gemini base slug (default tier argon) and `--effort` picks the level.
 - **grok specifics.**
+  - The prompt rides `--prompt-file <job>/prompt.md`, not `/dev/stdin`. On
+    Linux a spawned child's stdio is a socket, and opening `/dev/stdin` (which
+    is `/proc/self/fd/0`) on a socket fails with ENXIO, so 2.x grok consults
+    never worked on Linux. macOS dups the descriptor instead, which hid it.
   - `streaming-messages-json` is Anthropic's stream-json shape, so the claude
     parser reads it.
   - grok imports other harnesses' config by default (`~/.claude/CLAUDE.md` as
