@@ -1,6 +1,6 @@
 {
   "name": "gaslamp",
-  "version": "2.2.3",
+  "version": "3.0.0",
   "description": "Let coding agents consult each other from the shell: Claude, Codex, Gemini and Grok.",
   "type": "module",
   "bin": {
