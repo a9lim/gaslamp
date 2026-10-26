@@ -26,6 +26,10 @@ process.stdin.on("data", (d) => (prompt += d));
 process.stdin.on("end", () => setTimeout(() => {
   const argv = process.argv.slice(2);
   if (process.env.STUB_EXIT) { process.stderr.write("noise\\nstub claude: sandbox required but unavailable\\n"); process.exit(Number(process.env.STUB_EXIT)); }
+  if (process.env.STUB_AUTH_FAIL) {
+    process.stdout.write(JSON.stringify({ type: "result", is_error: true, result: "Failed to authenticate: OAuth session expired" }) + "\\n");
+    process.exit(1);
+  }
   const sid = argv.includes("--resume") ? argv[argv.indexOf("--resume") + 1] + "-fork" : "cl-sess-1";
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: sid }) + "\\n");
   const text = process.env.STUB_EMPTY ? "" : "stub claude: " + prompt + " || argv: " + JSON.stringify(argv) +
@@ -127,13 +131,12 @@ if (process.env.STUB_AUTH_HANG === "unterminated") {
 // Mimics `grok --prompt-file /dev/stdin --output-format streaming-messages-json …`:
 // Anthropic stream-json shape — system init (session id), a result.
 const GROK_STUB = `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 const argv = process.argv.slice(2);
 const at = (f) => argv.includes(f) ? argv[argv.indexOf(f) + 1] : null;
-let prompt = "";
-process.stdin.on("data", (d) => (prompt += d));
-process.stdin.on("end", () => setTimeout(() => {
+const prompt = readFileSync(at("--prompt-file"), "utf8");
+setTimeout(() => {
   const sid = at("--resume") ?? "gk-sess-1";
   const emit = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
   emit({ type: "system", subtype: "init", session_id: sid, model: at("-m") ?? "grok-4.7" });
@@ -155,7 +158,7 @@ process.stdin.on("end", () => setTimeout(() => {
     result.structured_output = { ok: true, who: "grok" };
   }
   emit(result);
-}, Number(process.env.STUB_DELAY_MS || 0)));
+}, Number(process.env.STUB_DELAY_MS || 0));
 `;
 
 // Codex's own live model catalog, as tier resolution reads it.
@@ -353,6 +356,11 @@ test("a claude sandbox that can't start fails the consult with the harness's rea
   assert.equal(m.error, "stub claude: sandbox required but unavailable");
   assert.match(r.stdout, /FAILED: stub claude: sandbox required but unavailable · job /);
   assert.match(r.stderr, /noise/); // the stderr tail is surfaced when there's no reply
+
+  // an error result's own text beats the exit code
+  const auth = run(["claude", "p"], { env: { STUB_AUTH_FAIL: "1" } });
+  assert.equal(auth.status, 1);
+  assert.equal(meta(jobIdFrom(auth.stdout)).error, "Failed to authenticate: OAuth session expired");
 });
 
 test("codex and grok map each mode to their own sandboxes; grok defaults to read-only, its permission layer skipped", () => {
@@ -754,7 +762,10 @@ test("gemini consult round-trips over agy's streaming input", () => {
 test("grok consult round-trips; a job id resumes its session", () => {
   const r = run(["grok", "hello grok"]);
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /"--prompt-file","\/dev\/stdin","--output-format","streaming-messages-json","--no-auto-update"/);
+  const argv = argvOf(r.stdout);
+  // the prompt rides the job's prompt.md, not /dev/stdin (ENXIO on Linux)
+  assert.equal(after_(argv, "--prompt-file"), join(home, "jobs", jobIdFrom(r.stdout), "prompt.md"));
+  assert.match(r.stdout, /"--output-format","streaming-messages-json","--no-auto-update"/);
   const again = run(["grok", "--resume", jobIdFrom(r.stdout), "--effort", "high", "p2"]);
   assert.match(again.stdout, /"--resume","gk-sess-1"/);
   assert.match(again.stdout, /"--effort","high"/);
