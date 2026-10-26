@@ -1,12 +1,10 @@
 #!/usr/bin/env node
-// gaslamp: let Claude Code and Codex consult each other — and Gemini and Grok —
-// from the shell.
+// gaslamp: let coding agents consult each other from the shell — Claude,
+// Codex, Gemini and Grok.
 //
-//   gaslamp claude … / codex …   one blocking consult (the heart of it)
-//   gaslamp gemini … / grok …    the same, against Antigravity CLI / Grok Build
-//   gaslamp fleet <backend> …    fan out a bounded fleet of consults
-//   gaslamp jobs / poll          read the durable consult records
-//   gaslamp setup [--local]      allowlist the command for Claude Code
+//   gaslamp claude|codex|gemini|grok …   one blocking consult (the heart of it)
+//   gaslamp jobs / poll / threads        read the durable records
+//   gaslamp setup                        link the skill, allowlist the command
 //
 // Each agent backgrounds the call with its own facility, so consults run in
 // parallel and replies trickle in as they finish. No MCP servers, no daemon:
@@ -19,114 +17,54 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
 
-const HELP = `gaslamp ${pkg.version}: let Claude Code and Codex consult each other from the shell
-(and consult Gemini and Grok).
+const HELP = `gaslamp ${pkg.version}: let coding agents consult each other from the shell.
 
 Usage:
-  gaslamp claude [opts] <prompt|->   Consult Claude (blocks until the reply).
-  gaslamp codex  [opts] <prompt|->   Consult Codex  (blocks until the reply).
-  gaslamp gemini [opts] <prompt|->   Consult Gemini via Antigravity CLI (agy).
-  gaslamp grok   [opts] <prompt|->   Consult Grok via Grok Build.
-  gaslamp fleet <backend> [opts]     Fan out a fleet of consults (one command).
-    -n N <prompt>                    Replicate one prompt across N fresh sessions.
-    - < tasks.jsonl                  Or one task per line on stdin (see below).
-  gaslamp fleet --resume <fleet-id>  Finish an interrupted fleet: done children
-                                     replay their recorded replies, killed ones
-                                     are nudged to conclude via their sessions,
-                                     the rest rerun from the stored manifest.
-  gaslamp jobs [-n N] [--json]       List consult records, newest first.
-  gaslamp threads                    List named threads, latest activity first.
-  gaslamp poll <job|fleet|--last> [--json]
-                                     Print one record's reply/status.
-  gaslamp tail <job|--last>          Follow one consult's events as one-liners
-                                     (both backends' schemas, uniformly).
-  gaslamp setup [--local] [--skill]  Allowlist the command in Claude Code so
-                                     consults don't stall on a permission prompt.
-                                     --local pins this checkout's bin path.
-                                     --skill also installs the gaslamp skill
-                                     for BOTH agents (~/.claude/skills/,
-                                     $CODEX_HOME/skills/).
+  gaslamp <claude|codex|gemini|grok> [opts] <prompt|->
+                             Consult one; blocks until the reply. Run it in the
+                             background and keep working.
+  gaslamp jobs [-n N] [--json]       Recent consults, newest first.
+  gaslamp poll <job|--last> [--json] One consult's reply (exit 10 = running).
+  gaslamp threads                    Named conversations, latest first.
+  gaslamp setup                      Link the skill into Claude Code and Codex,
+                                     and allowlist the command for Claude Code.
 
 Consult options:
-  --resume <session|job>   Continue a session (a prior job id works too).
-  --thread <name>          Named session: continue it if the name is bound,
-                           else start fresh and bind it. The pointer chases
-                           claude's forked session ids so the name stays hot.
-  --model <m>              Backend model: an exact id, or a tier word —
-                           claude aliases (fable, opus, sonnet, haiku); codex
-                           (astra, sol, luna) and gemini (argon, flash) tiers
-                           resolve to the newest id in the harness's own
-                           catalog. gemini defaults to argon (Antigravity also
-                           serves non-Gemini models under the same account).
-  --effort <level>         Reasoning effort (claude --effort / codex
-                           model_reasoning_effort / agy --effort /
-                           grok --effort).
-  --label <s>              Tag the job record (shows in gaslamp jobs).
-  --sandbox <mode>         claude: read-only | danger-full-access
-                           codex:  read-only | workspace-write | danger-full-access
-                           gemini: read-only | danger-full-access
-                           grok:   read-only | workspace-write | danger-full-access
-                           Omitted: claude and codex defer to the consulted
-                           agent's own config; gemini and grok run read-only.
-  --cwd <dir>              Working directory for the consult (default: here).
-  --schema <file|json>     JSON Schema for the reply (native on both backends:
-                           claude --json-schema / codex --output-schema). The
-                           --json envelope gains data (the parsed object); a
-                           reply that doesn't parse marks the consult failed.
-  --raw                    Skip the consult preamble (the few fixed lines that
-                           tell the consultee its reply returns verbatim).
-  --json                   Machine envelope on stdout:
-                           {backend, jobId, sessionId, status, exitCode,
-                            content, data?}
-  -                        Read the prompt from stdin (default when piped).
-                           With a prompt argument, piped stdin is instead
-                           appended as a <stdin> evidence block:
-                           git diff | gaslamp codex "review for races:"
+  --thread <name>          Name the conversation: the first consult with a
+                           name starts it, later ones continue it (from the
+                           directory it started in).
+  --resume <job-id>        Continue an unnamed consult's conversation.
+  --model <m>              An exact id, or a tier: claude fable|opus|sonnet|
+                           haiku; codex astra|sol|luna; gemini argon|flash
+                           (default argon).
+  --effort <level>         low|medium|high|xhigh|max (codex astra/sol: ultra).
+  --sandbox <mode>         read-only | workspace-write | danger-full-access.
+                           Omitted: claude and codex use their own config;
+                           gemini and grok run read-only. The fenced modes
+                           are OS-enforced; gemini's needs macOS.
+  --cwd <dir>              Run the consult there (default: here).
+  --schema <file|json>     JSON Schema for the reply; with --json the parsed
+                           reply is in data, and one that doesn't parse fails.
+  --json                   {backend, jobId, status, thread, content, error?, data?}
+  -                        Read the prompt from stdin (the default when piped).
+                           With a prompt argument, piped stdin is appended as
+                           a <stdin> evidence block:
+                             git diff | gaslamp codex "review for races:"
 
-Fleet options (in addition to --model / --sandbox / --cwd / --json, applied to
-every consult unless a per-task field on a stdin manifest overrides it):
-  -n, --count N            Replicate the prompt across N fresh sessions.
-  -j, --concurrency N      Max consults in flight (default 4 — quota-shaped).
-  --stream                 Print each reply the moment it completes instead of
-                           collecting to the end (with --json: JSONL — one
-                           result line per reply, then a fleet.done line).
-  - < tasks.jsonl          One task per line: a {"prompt",…} JSON object (also
-                           model/sandbox/effort/cwd/resume/thread/label/schema/
-                           raw — schema may be an inline JSON object), or a
-                           bare prompt.
-                           A prompt argument + piped stdin shares one <stdin>
-                           evidence block across every replica.
-A fleet defaults its consults to --sandbox read-only (N writers in one cwd
-race); pass --sandbox to opt into writes. It blocks until every consult is in,
-then prints them all (--json: a results array, manifest order). A killed fleet
-leaves each child resumable; gaslamp poll <fleet-id> regroups them later.
-
-Run a consult (or a fleet) as a background shell task and keep working — several
-can run in parallel, replies land as the tasks finish. Every consult writes through to
-~/.gaslamp/jobs/<id>/ (prompt, raw events, reply, stderr), and the session id
-is recorded the moment the backend reports it: a killed consult costs the
-in-flight turn, not the session. Recovery is --resume, not orphans.
+Every consult writes through to ~/.gaslamp/jobs/<id>/ (prompt, raw events,
+stderr, reply), and its session is recorded the moment the backend reports it:
+a killed consult loses the turn in flight, not the conversation.
 
 Exit codes:
-  0 ok · 1 consult failed/killed · 2 usage · 3 nested (one-hop) refusal ·
-  4 network-disabled sandbox · 5 session busy · poll: 10 still running
+  0 ok · 1 failed or killed · 2 usage · 3 nested (one-hop) refusal ·
+  4 can't run here (no network, or no OS sandbox for the mode) ·
+  5 conversation busy · poll: 10 still running
 
-Env knobs:
+Env:
   GASLAMP_HOME             state dir (default ~/.gaslamp)
-  GASLAMP_ALLOWED_TOOLS    tools the claude read-only override permits,
-                           comma-separated (default: Read,Grep,Glob,WebFetch,
-                           WebSearch + read-only git via Bash(git diff:*) etc)
   GASLAMP_ALLOW_RECURSION  let consulted agents consult back (off = one hop)
-  GASLAMP_DEBUG            verbose stderr (spawn argv)
-  CLAUDE_BIN / CODEX_BIN / AGY_BIN / GROK_BIN
-                           backend binaries (autodetected otherwise)
-  GASLAMP_GEMINI_SEATBELT  0 = read-only gemini consults rely on Antigravity's
-                           preset check instead of Seatbelt (macOS default)
-
-Every job record (meta.json) carries provenance: provider, harness version,
-the model the backend reported (or unknown), the vendor system prompt's hash
-where the harness exposes it (grok) or known:false, the retrieval tools the
-consultee had and used, and the gaslamp version and git revision.
+  GASLAMP_DEBUG            print the spawn argv
+  CLAUDE_BIN / CODEX_BIN / AGY_BIN / GROK_BIN   backend binaries
 `;
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -140,24 +78,9 @@ switch (cmd) {
     runConsult(cmd, rest);
     break;
   }
-  case "fleet": {
-    const { runFleet } = await import(new URL("../src/fleet.mjs", import.meta.url));
-    runFleet(rest[0], rest.slice(1));
-    break;
-  }
   case "jobs": {
     const { runJobs } = await import(new URL("../src/jobs.mjs", import.meta.url));
     runJobs(rest);
-    break;
-  }
-  case "threads": {
-    const { runThreads } = await import(new URL("../src/threads.mjs", import.meta.url));
-    runThreads();
-    break;
-  }
-  case "tail": {
-    const { runTail } = await import(new URL("../src/tail.mjs", import.meta.url));
-    runTail(rest);
     break;
   }
   case "poll": {
@@ -165,9 +88,14 @@ switch (cmd) {
     runPoll(rest);
     break;
   }
+  case "threads": {
+    const { runThreads } = await import(new URL("../src/threads.mjs", import.meta.url));
+    runThreads();
+    break;
+  }
   case "setup": {
     const { runSetup } = await import(new URL("../src/setup.mjs", import.meta.url));
-    runSetup(rest);
+    runSetup();
     break;
   }
   case "-v":
@@ -178,6 +106,11 @@ switch (cmd) {
   case "-h":
   case "--help":
     process.stdout.write(HELP);
+    break;
+  case "fleet":
+  case "tail":
+    process.stderr.write(`gaslamp: ${cmd} is gone in gaslamp 3 — run several consults in the background instead (see gaslamp --help)\n`);
+    process.exitCode = 2;
     break;
   default:
     process.stderr.write(`gaslamp: unknown command "${cmd}"\n\n` + HELP);

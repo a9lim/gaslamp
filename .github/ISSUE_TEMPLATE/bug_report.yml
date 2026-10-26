@@ -39,11 +39,12 @@ body:
   - type: dropdown
     id: direction
     attributes:
-      label: Which direction?
+      label: Which target?
       options:
-        - Codex → Claude (`gaslamp claude …`)
-        - Claude → Codex (`gaslamp codex …`)
-        - fleet (`gaslamp fleet …`)
+        - claude (`gaslamp claude …`)
+        - codex (`gaslamp codex …`)
+        - gemini (`gaslamp gemini …`)
+        - grok (`gaslamp grok …`)
         - setup
         - not sure
     validations:
@@ -53,7 +54,7 @@ body:
     id: job-id
     attributes:
       label: Job id
-      description: The `job:` id from the trailer, if you have one (records live under `~/.gaslamp/jobs/<id>/`).
+      description: The job id from the trailer, if you have one (records live under `~/.gaslamp/jobs/<id>/`).
 
   - type: textarea
     id: repro

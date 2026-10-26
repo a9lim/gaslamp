@@ -9,22 +9,21 @@ test runner) needs a strong reason.
 
 ## Before you change the consult engine
 
-`src/consult.mjs` is the heart, and both spawn directions (Claude → Codex,
-Codex → Claude) are deliberately kept symmetric. Read the header comments and
-`AGENTS.md` ("Things that are not obvious") before touching it — several flags
-encode hard-won, non-obvious backend behavior. Changing the backend argv
-contract, the session-id capture, or the kill/resume semantics needs justifying
-on review.
+`src/consult.mjs` is the heart, and the four targets are deliberately kept
+symmetric. Read the header comments and `AGENTS.md` ("Things that are not
+obvious") before touching it — several flags encode hard-won, non-obvious
+backend behavior. Changing a backend argv contract, a sandbox mapping, the
+session-id capture, or the kill/continue semantics needs justifying on review.
 
 ## Test plan
 
 ```sh
-npm test          # node --test against stub claude AND codex binaries
+npm test          # node --test against stub claude, codex, agy and grok binaries
 npm run check     # node -c syntax check on every source file
 ```
 
-`npm test` drives both consult directions and the fleet end-to-end against stub
-backends — no real agent in the loop. If you change a backend argv contract, the
+`npm test` drives every consult target end-to-end against stub backends — no
+real agent in the loop. If you change a backend argv contract, the
 `--json` envelope shape, or the job-record fields, update the tests in the same
 PR.
 
