@@ -35,9 +35,10 @@ Consult options:
                            directory it started in).
   --resume <job-id>        Continue an unnamed consult's conversation.
   --model <m>              An exact id, or a tier: claude fable|opus|sonnet|
-                           haiku; codex astra|sol|luna; gemini argon|flash
-                           (default argon).
-  --effort <level>         low|medium|high|xhigh|max (codex astra/sol: ultra).
+                           haiku; codex astra|sol|terra|luna; gemini carbon|
+                           neon|hydrogen (default carbon if listed, else neon).
+  --effort <level>         low|medium|high|xhigh|max (codex astra/sol/terra:
+                           ultra).
   --sandbox <mode>         read-only | workspace-write | danger-full-access.
                            Omitted: claude and codex use their own config;
                            gemini and grok run read-only. The fenced modes

@@ -77,8 +77,9 @@ const argv = process.argv.slice(2);
 if (argv[0] === "models") {
   if (process.env.STUB_MODELS_FAIL) { console.error("network down"); process.exit(1); }
   console.log("Fetching available models...");
-  for (const m of ["gemini-4-argon-medium", "gemini-4-argon-high", "gemini-3.8-argon-low",
-    "gemini-3.8-flash-medium", "claude-opus-5-5-high"]) console.log(m + "\\tStub " + m);
+  const carbon = process.env.STUB_CARBON ? ["gemini-4-carbon-high"] : [];
+  for (const m of [...carbon, "gemini-4-neon-medium", "gemini-4-neon-xhigh", "gemini-3.8-neon-low",
+    "gemini-4-argon-high", "gemini-4-hydrogen-medium", "claude-opus-5-5-high"]) console.log(m + "\\tStub " + m);
   process.exit(0);
 }
 if (process.env.STUB_STUBBORN_CHILD) {
@@ -304,10 +305,12 @@ test("tier words resolve against the harness's own catalog; exact ids and unknow
   assert.match(run(["codex", "--model", "sol", "p"]).stdout, /"-m","gpt-6\.1-sol"/);
   assert.match(run(["codex", "--model", "luna", "p"]).stdout, /"-m","gpt-6-luna"/); // a hidden newer slug is no candidate
   assert.match(run(["codex", "--model", "nova", "p"]).stdout, /"-m","nova"/);
-  assert.match(run([...GEMINI, "p"]).stdout, /"--model","gemini-4-argon"/);   // pinned to argon by default
-  assert.match(run([...GEMINI, "--model", "flash", "p"]).stdout, /"--model","gemini-3\.8-flash"/);
-  assert.match(run([...GEMINI, "--model", "gemini-3.8-argon", "p"]).stdout, /"--model","gemini-3\.8-argon"/);
-  assert.match(run([...GEMINI, "p"], { env: { STUB_MODELS_FAIL: "1" } }).stdout, /"--model","argon"/);
+  assert.match(run([...GEMINI, "p"]).stdout, /"--model","gemini-4-neon"/);    // no carbon listed: neon
+  assert.match(run([...GEMINI, "p"], { env: { STUB_CARBON: "1" } }).stdout, /"--model","gemini-4-carbon"/);
+  assert.match(run([...GEMINI, "--model", "hydrogen", "p"]).stdout, /"--model","gemini-4-hydrogen"/);
+  assert.match(run([...GEMINI, "--model", "argon", "p"]).stdout, /"--model","gemini-4-argon"/); // any listed family
+  assert.match(run([...GEMINI, "--model", "gemini-3.8-neon", "p"]).stdout, /"--model","gemini-3\.8-neon"/);
+  assert.match(run([...GEMINI, "p"], { env: { STUB_MODELS_FAIL: "1" } }).stdout, /"--model","neon"/);
   assert.match(run(["claude", "--model", "sonnet", "p"]).stdout, /"--model","sonnet"/); // claude resolves its own
 });
 
