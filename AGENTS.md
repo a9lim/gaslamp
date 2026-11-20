@@ -239,8 +239,10 @@ JSON.
     non-JSON stdout, across chunks, never reply content) for
     `Authentication required` and kills the group.
   - agy serves Claude and GPT-OSS models under the same account, and its slugs
-    carry the effort (`gemini-4-argon-high`), so a gemini consult always passes
-    a Gemini base slug (default tier argon) and `--effort` picks the level.
+    carry the effort (`gemini-4-neon-high`), so a gemini consult always passes
+    a Gemini base slug and `--effort` picks the level. The default is the first
+    of carbon and neon the account's catalog lists: Antigravity offers carbon
+    only to some sign-ins (enterprise and ADC, as of 1.5.13).
 - **grok specifics.**
   - The prompt rides `--prompt-file <job>/prompt.md`, not `/dev/stdin`. On
     Linux a spawned child's stdio is a socket, and opening `/dev/stdin` (which

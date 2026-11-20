@@ -15,18 +15,27 @@ Send raw evidence, such as errors, diffs and failing output, not just your readi
 
 ## Choosing a consultee
 
-| target | `--model` | omitted `--model` | omitted `--sandbox` |
-|--------|-----------|-------------------|---------------------|
+| target | `--model` tiers | omitted `--model` | omitted `--sandbox` |
+|--------|-----------------|-------------------|---------------------|
 | claude | fable, opus, sonnet, haiku | its own default | its own config |
-| codex  | astra, sol, luna | its own default | its own config |
-| gemini | argon, flash | argon | read-only |
+| codex  | astra, sol, terra, luna | its own default | its own config |
+| gemini | carbon, neon, hydrogen | carbon if listed, else neon | read-only |
 | grok   | an id from `grok models` | the account default | read-only |
 
-Roughly, strongest first: fable\* > opus ≈ astra > sonnet ≈ argon ≈ sol > haiku ≈ flash ≈ grok ≈ luna. Match the tier to the stakes, as you would when picking a subagent's model.
+A tier word reaches its family's newest version, and an exact id works too. Antigravity offers carbon only to some sign-ins; `agy models` says whether yours has it.
 
-\* The public fable is a generation behind the others (5.1, against 5.5 for opus, sonnet and haiku), so for now it sits between opus and sonnet.
+Strength as of November 2026, band 1 strongest:
 
-`--effort low|medium|high|xhigh|max` sets reasoning effort. astra and sol also take `ultra`. sol defaults to `low`, so set it when the consult matters.
+| band | claude | codex | gemini | grok |
+|------|--------|-------|--------|------|
+| 1 | fable | astra | | |
+| 2 | opus | sol | carbon | |
+| 3 | sonnet | terra | neon | |
+| 4 | haiku | luna | hydrogen | grok |
+
+Match the band to the stakes, as you would when picking a subagent's model. For a check, another lineage adds more independence than another model of your own. The bands shift within weeks: tier words follow new versions by themselves, but a family newer than this grid isn't in it.
+
+`--effort low|medium|high|xhigh|max` sets reasoning effort. Codex's astra, sol and terra also take `ultra`, and their newest versions start at `low`, so set it when the consult matters.
 
 ## Conversations
 
