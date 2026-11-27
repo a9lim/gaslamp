@@ -26,7 +26,7 @@ Usage:
   gaslamp jobs [-n N] [--json]       Recent consults, newest first.
   gaslamp poll <job|--last> [--json] One consult's reply (exit 10 = running).
   gaslamp threads                    Named conversations, latest first.
-  gaslamp setup                      Link the skill into Claude Code and Codex,
+  gaslamp setup                      Link the skill into every installed harness,
                                      and allowlist the command for Claude Code.
 
 Consult options:
@@ -36,7 +36,7 @@ Consult options:
   --resume <job-id>        Continue an unnamed consult's conversation.
   --model <m>              An exact id, or a tier: claude fable|opus|sonnet|
                            haiku; codex astra|sol|terra|luna; gemini neon|
-                           hydrogen (default neon).
+                           carbon|hydrogen (default neon).
   --effort <level>         low|medium|high|xhigh|max (codex astra/sol/terra:
                            ultra).
   --sandbox <mode>         read-only | workspace-write | danger-full-access.

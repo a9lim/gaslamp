@@ -49,14 +49,28 @@ function runSetup() {
   delete e.GASLAMP_NESTED;
   return spawnSync(process.execPath, [BIN, "setup"], {
     encoding: "utf8",
-    env: { ...e, HOME: fakeHome, CODEX_HOME: join(fakeHome, ".codex"), GASLAMP_HOME: join(fakeHome, ".gaslamp") },
+    env: { ...e, HOME: fakeHome, CODEX_HOME: join(fakeHome, ".codex"), GROK_HOME: join(fakeHome, ".grok"), GASLAMP_HOME: join(fakeHome, ".gaslamp") },
   });
 }
 
-test("setup links the one skill into both harnesses and allowlists the command, idempotently", () => {
+test("setup skips agy and grok until their homes exist", () => {
   const r = runSetup();
   assert.equal(r.status, 0, r.stderr);
-  for (const link of [join(fakeHome, ".claude", "skills", "gaslamp"), join(fakeHome, ".codex", "skills", "gaslamp")]) {
+  assert.ok(!existsSync(join(fakeHome, ".gemini")));
+  assert.ok(!existsSync(join(fakeHome, ".grok")));
+});
+
+test("setup links the one skill into every harness and allowlists the command, idempotently", () => {
+  mkdirSync(join(fakeHome, ".gemini"), { recursive: true });
+  mkdirSync(join(fakeHome, ".grok"), { recursive: true });
+  const r = runSetup();
+  assert.equal(r.status, 0, r.stderr);
+  for (const link of [
+    join(fakeHome, ".claude", "skills", "gaslamp"),
+    join(fakeHome, ".codex", "skills", "gaslamp"),
+    join(fakeHome, ".gemini", "config", "skills", "gaslamp"),
+    join(fakeHome, ".grok", "skills", "gaslamp"),
+  ]) {
     assert.ok(lstatSync(link).isSymbolicLink(), link);
     assert.equal(readlinkSync(link), SKILL);
   }

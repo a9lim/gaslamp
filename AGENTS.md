@@ -318,9 +318,9 @@ release.
 - `src/jobs.mjs`: job records, the trailer, the `--json` envelope, `jobs` and `poll`
 - `src/threads.mjs`: thread pointers and `threads`
 - `src/stdin.mjs`: read stdin to EOF, even non-blocking; give up on an idle socket
-- `src/setup.mjs`: link the skill into both harnesses; allowlist the command
+- `src/setup.mjs`: link the skill into every installed harness; allowlist the command
 - `src/which.mjs`: PATH lookup without spawning a shell
-- `skill/SKILL.md`: the one skill both harnesses read
+- `skill/SKILL.md`: the one skill all four harnesses read
 - `tests/cli.test.mjs`: every target end-to-end against stub binaries
 - `tests/setup.test.mjs`: allowlist merge and skill links in a temp HOME
 
@@ -334,6 +334,7 @@ release.
 | `GASLAMP_DEBUG` | unset | print the spawn argv |
 | `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN` / `GROK_BIN` | autodetected | backend binaries |
 | `CODEX_HOME` | `~/.codex` | where `setup` links Codex's skill |
+| `GROK_HOME` | `~/.grok` | where `setup` links Grok's skill |
 
 Exit codes: `0` reply delivered · `1` consult failed or killed (including an
 empty or unparseable schema reply) · `2` usage · `3` nested · `4` can't run
