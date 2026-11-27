@@ -1,9 +1,11 @@
-// setup.mjs — make gaslamp known to both agents, and runnable without a prompt.
+// setup.mjs — make gaslamp known to every agent, and runnable without a prompt.
 //
-//   - Link this package's skill/ into ~/.claude/skills/gaslamp and
-//     $CODEX_HOME/skills/gaslamp. Both harnesses read the same SKILL.md
-//     format, and one symmetric skill teaches all four targets; a link (not
-//     a copy) keeps the guidance in step with the installed binary.
+//   - Link this package's skill/ into each harness's user skills directory:
+//     ~/.claude/skills, $CODEX_HOME/skills, and, where that harness is
+//     installed (its home directory exists), Antigravity's
+//     ~/.gemini/config/skills and Grok's $GROK_HOME/skills. All four read the
+//     same SKILL.md format, and one symmetric skill teaches all four targets;
+//     a link (not a copy) keeps the guidance in step with the installed binary.
 //   - Allowlist the command in ~/.claude/settings.json, so a consult doesn't
 //     stall on a permission prompt. (Codex needs no analog: its shell
 //     commands are governed by approval_policy.)
@@ -52,10 +54,21 @@ export function linkSkill(skillsDir, src = SKILL_SRC) {
   return `skill: ${dest} → ${src}`;
 }
 
+// The skills directories setup links into. Claude Code and Codex always get
+// one; Antigravity and Grok only when their home exists, so a machine without
+// them isn't littered with empty config trees.
+export function skillDirs(home = homedir(), env = process.env) {
+  const codexHome = env.CODEX_HOME || join(home, ".codex");
+  const geminiHome = join(home, ".gemini");
+  const grokHome = env.GROK_HOME || join(home, ".grok");
+  const dirs = [join(home, ".claude", "skills"), join(codexHome, "skills")];
+  if (existsSync(geminiHome)) dirs.push(join(geminiHome, "config", "skills"));
+  if (existsSync(grokHome)) dirs.push(join(grokHome, "skills"));
+  return dirs;
+}
+
 export function runSetup() {
-  const codexHome = process.env.CODEX_HOME || join(homedir(), ".codex");
-  for (const dir of [join(homedir(), ".claude", "skills"), join(codexHome, "skills")])
-    console.log(linkSkill(dir));
+  for (const dir of skillDirs()) console.log(linkSkill(dir));
 
   const settingsPath = join(homedir(), ".claude", "settings.json");
   const next = addAllow(existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : "", ALLOW_ENTRY);

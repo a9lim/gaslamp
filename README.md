@@ -46,8 +46,9 @@ npm install -g gaslamp
 gaslamp setup
 ```
 
-`setup` links gaslamp's skill into `~/.claude/skills/` and
-`$CODEX_HOME/skills/`, which is how both agents learn the command exists, and
+`setup` links gaslamp's skill into `~/.claude/skills/`, `$CODEX_HOME/skills/`
+and, where Antigravity or Grok Build is installed, `~/.gemini/config/skills/`
+and `$GROK_HOME/skills/`, which is how each agent learns the command exists, and
 allowlists `Bash(gaslamp *)` in `~/.claude/settings.json` so a consult doesn't
 stall on a permission prompt. It is idempotent and never touches an agent's
 instruction files. The skill is a link into the installed package, so it
@@ -190,6 +191,7 @@ still running.
 | `GASLAMP_DEBUG` | unset | print the spawn argv |
 | `CLAUDE_BIN` / `CODEX_BIN` / `AGY_BIN` / `GROK_BIN` | autodetected | backend binaries |
 | `CODEX_HOME` | `~/.codex` | where `setup` links Codex's skill |
+| `GROK_HOME` | `~/.grok` | where `setup` links Grok's skill |
 
 ## Upgrading from 2.x
 

@@ -26,7 +26,7 @@ Usage:
   gaslamp jobs [-n N] [--json]       Recent consults, newest first.
   gaslamp poll <job|--last> [--json] One consult's reply (exit 10 = running).
   gaslamp threads                    Named conversations, latest first.
-  gaslamp setup                      Link the skill into Claude Code and Codex,
+  gaslamp setup                      Link the skill into every installed harness,
                                      and allowlist the command for Claude Code.
 
 Consult options:
