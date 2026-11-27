@@ -18,7 +18,7 @@ A consult blocks until the reply arrives, so run it in the background and keep w
 | band | claude | codex | gemini | grok |
 |------|--------|-------|--------|------|
 | 1 | fable | astra | neon | |
-| 2 | opus | sol | carbon | |
+| 2 | opus | sol | | |
 | 3 | sonnet | terra | hydrogen | |
 | 4 | haiku | luna | | grok |
 

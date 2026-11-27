@@ -36,7 +36,7 @@ Consult options:
   --resume <job-id>        Continue an unnamed consult's conversation.
   --model <m>              An exact id, or a tier: claude fable|opus|sonnet|
                            haiku; codex astra|sol|terra|luna; gemini neon|
-                           carbon|hydrogen (default neon).
+                           hydrogen (default neon).
   --effort <level>         low|medium|high|xhigh|max (codex astra/sol/terra:
                            ultra).
   --sandbox <mode>         read-only | workspace-write | danger-full-access.

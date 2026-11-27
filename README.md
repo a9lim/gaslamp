@@ -68,7 +68,7 @@ gaslamp setup                                         Link the skill, allowlist 
   --thread <name>          Name the conversation: start it, or continue it.
   --resume <job-id>        Continue an unnamed consult's conversation.
   --model <m>              An exact id or a tier: claude fable|opus|sonnet|haiku,
-                           codex astra|sol|terra|luna, gemini neon|carbon|hydrogen.
+                           codex astra|sol|terra|luna, gemini neon|hydrogen.
   --effort <level>         low|medium|high|xhigh|max.
   --sandbox <mode>         read-only | workspace-write | danger-full-access.
   --cwd <dir>              Where the consult runs.
