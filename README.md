@@ -67,7 +67,7 @@ gaslamp setup                                         Link the skill, allowlist 
   --thread <name>          Name the conversation: start it, or continue it.
   --resume <job-id>        Continue an unnamed consult's conversation.
   --model <m>              An exact id or a tier: claude fable|opus|sonnet|haiku,
-                           codex astra|sol|terra|luna, gemini carbon|neon|hydrogen.
+                           codex astra|sol|terra|luna, gemini neon|hydrogen.
   --effort <level>         low|medium|high|xhigh|max.
   --sandbox <mode>         read-only | workspace-write | danger-full-access.
   --cwd <dir>              Where the consult runs.
@@ -77,9 +77,8 @@ gaslamp setup                                         Link the skill, allowlist 
 
 Tier words resolve against each harness's own model catalog, so a new
 generation is picked up without a gaslamp release. A gemini consult always
-pins a Gemini model (unless you say otherwise, carbon where your account lists
-it, else neon): Antigravity also serves Claude and GPT models under the same
-account.
+pins a Gemini model (neon unless you say otherwise): Antigravity also serves
+Claude and GPT models under the same account.
 
 ## Conversations
 
