@@ -48,13 +48,11 @@ const die = (code, msg) => { writeSync(2, `gaslamp: ${msg}\n`); process.exit(cod
 
 const realHome = () => { try { return realpathSync(homedir()); } catch { return homedir(); } };
 
-// The default Gemini when --model is omitted: the first of these tiers the
-// account's catalog lists (Antigravity offers carbon only to some sign-ins).
-// Antigravity also serves Claude and GPT-OSS models under the same account,
-// and an account default pointing at one of them would turn a "gemini"
-// consult into a second opinion from a model the caller already has — so the
-// target always pins a Gemini.
-const GEMINI_DEFAULT_TIERS = ["carbon", "neon"];
+// The default Gemini tier when --model is omitted. Antigravity also serves
+// Claude and GPT-OSS models under the same account, and an account default
+// pointing at one of them would turn a "gemini" consult into a second opinion
+// from a model the caller already has — so the target always pins a Gemini.
+const GEMINI_DEFAULT_TIER = "neon";
 
 // The consult preamble: the one piece of framing a consulted agent needs.
 // Subagents are told their final text IS the return value; a consult deserves
@@ -376,14 +374,7 @@ export function agyCatalog(bin, env = process.env) {
 }
 
 function resolveModel(backend, model, bin, env) {
-  if (backend === "gemini" && !model) {
-    const catalog = agyCatalog(bin, env);
-    for (const tier of GEMINI_DEFAULT_TIERS) {
-      const slug = newestOfTier(catalog, "gemini", tier);
-      if (slug) return slug;
-    }
-    return GEMINI_DEFAULT_TIERS.at(-1); // no catalog: agy resolves or rejects the word
-  }
+  if (backend === "gemini") model ??= GEMINI_DEFAULT_TIER;
   if (!model || !/^[a-z]+$/.test(model)) return model ?? null;
   if (backend === "codex") return newestOfTier(codexCatalog(), "gpt", model) ?? model;
   if (backend === "gemini") return newestOfTier(agyCatalog(bin, env), "gemini", model) ?? model;

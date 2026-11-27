@@ -1,69 +1,41 @@
 ---
 name: gaslamp
-description: Consult another coding agent (Claude, Codex, Gemini or Grok) from the shell for an independent read or a handoff. Use it to verify a fix or proof, spar on a design, review a diff, search, diagnose with fresh context, or hand off a piece of work. Use it when a claim deserves checking before you rely on it, or when asked to consult Claude / Codex / Gemini / Grok, get a second opinion, or hand work off.
+description: Consult another coding agent (Claude, Codex, Gemini or Grok) from the shell for a second read or a handoff, such as a review, a check, a search or a piece of work. Use it when another agent's view would help, or when asked to consult Claude / Codex / Gemini / Grok.
 ---
 
 # gaslamp
 
     gaslamp <claude|codex|gemini|grok> [options] "<prompt>"
-    git diff | gaslamp codex "review this for races:"   # piped stdin rides along as <stdin> evidence
-    gaslamp claude - < notes.md                         # the whole prompt from a file
+    git diff | gaslamp codex "review this:"   # piped stdin rides along as <stdin> evidence
+    gaslamp claude - < notes.md               # the whole prompt from a file
 
-A consult blocks until the reply arrives, so run it in the background (`run_in_background` in Claude Code, a background terminal in Codex) and keep working. Several can run at once. You get the consultee's final message verbatim, then one `[gaslamp]` line with the job id and the command that continues the conversation. A consult is one hop: the consultee can't consult back, so the synthesis is yours.
+A consult blocks until the reply arrives, so run it in the background and keep working. Several can run at once. You get the consultee's final message, then a `[gaslamp]` line with the job id and the command that continues the conversation. The consultee can't consult back.
 
-Send raw evidence, such as errors, diffs and failing output, not just your reading of it.
+## Models
 
-## Choosing a consultee
-
-| target | `--model` tiers | omitted `--model` | omitted `--sandbox` |
-|--------|-----------------|-------------------|---------------------|
-| claude | fable, opus, sonnet, haiku | its own default | its own config |
-| codex  | astra, sol, terra, luna | its own default | its own config |
-| gemini | carbon, neon, hydrogen | carbon if listed, else neon | read-only |
-| grok   | an id from `grok models` | the account default | read-only |
-
-A tier word reaches its family's newest version, and an exact id works too. Antigravity offers carbon only to some sign-ins; `agy models` says whether yours has it.
-
-Strength as of November 2026, band 1 strongest:
+`--model` takes a tier word, which resolves to its family's newest version, or an exact id. Strength as of November 2026, band 1 strongest:
 
 | band | claude | codex | gemini | grok |
 |------|--------|-------|--------|------|
-| 1 | fable | astra | | |
-| 2 | opus | sol | carbon | |
-| 3 | sonnet | terra | neon | |
-| 4 | haiku | luna | hydrogen | grok |
+| 1 | fable | astra | neon | |
+| 2 | opus | sol | | |
+| 3 | sonnet | terra | hydrogen | |
+| 4 | haiku | luna | | grok |
 
-Match the band to the stakes, as you would when picking a subagent's model. For a check, another lineage adds more independence than another model of your own. The bands shift within weeks: tier words follow new versions by themselves, but a family newer than this grid isn't in it.
+Without `--model`, gemini runs neon and the others run their harness's default. Grok takes an id from `grok models`.
 
-`--effort low|medium|high|xhigh|max` sets reasoning effort. Codex's astra, sol and terra also take `ultra`, and their newest versions start at `low`, so set it when the consult matters.
+`--effort low|medium|high|xhigh|max`. Codex's astra, sol and terra also take `ultra`, and they default to `low`.
 
 ## Conversations
 
-`--thread <name>` names a conversation. The first consult with a name starts it, and every later one continues it.
-
-- Name it for its subject (`auth-race-review`, not `review`).
-- For an independent second opinion, use a new name, because a reused name carries the earlier context along.
-- A thread lives in the directory it started in. To continue it from anywhere else, pass `--cwd`.
-
-Without `--thread` a consult is a one-off, though `--resume <job-id>` can still continue it.
+`--thread <name>`: the first consult with a name starts a conversation and later ones continue it. A new name starts fresh. A thread lives in the directory it started in, so continue it from elsewhere with `--cwd`. A consult without `--thread` can still be continued with `--resume <job-id>`.
 
 ## Sandbox
 
-`--sandbox read-only | workspace-write | danger-full-access`
-
-- **read-only:** the consultee writes nothing outside its harness's own state and temp dirs.
-- **workspace-write:** it writes only in the cwd.
-
-The OS sandbox enforces both, and if the sandbox can't start, gaslamp refuses the consult instead of running it unfenced. Gemini's sandbox is macOS-only, so elsewhere only `danger-full-access` runs it.
-
-The sandbox fences the filesystem, not search. A read-only consultee can still look things up: Google for Gemini, web and X for Grok. For a search consult, send the question and ask for source URLs, since a summary of search results isn't verification. For a review, pipe in the material.
+`--sandbox read-only | workspace-write | danger-full-access`. Read-only writes nothing outside the harness's own state and temp dirs, and workspace-write writes only in the cwd. The OS enforces both, and if its sandbox can't start, gaslamp refuses the consult. Gemini's sandbox is macOS-only. Without `--sandbox`, claude and codex use their own config, and gemini and grok run read-only. A fenced consultee can still search: Google for Gemini, web and X for Grok.
 
 ## The rest
 
-- `--cwd <dir>` runs the consult in another directory.
-- `--json` prints `{backend, jobId, status, thread, content, error?, data?}`.
-- `--schema <file|json>` with `--json` puts the parsed reply in `.data`. A reply that doesn't parse fails the consult.
-- `gaslamp jobs` lists recent consults, `gaslamp poll <job|--last>` prints one (exit 10 means it's still running), and `gaslamp threads` lists conversations.
-- Each job lives in `~/.gaslamp/jobs/<id>/`, raw events included. A killed consult loses its current turn but keeps its conversation.
-
-Exit codes: 0 ok · 1 failed or killed · 2 usage · 3 nested · 4 can't run here (no network, or no sandbox for the mode) · 5 conversation busy.
+- `--json` prints `{backend, jobId, status, thread, content, error?, data?}`. `--schema <file|json>` puts the parsed reply in `.data`.
+- `gaslamp jobs`, `gaslamp poll <job|--last>` and `gaslamp threads` read the records in `~/.gaslamp/`. A killed consult keeps its conversation.
+- Exit codes: 0 ok · 1 failed or killed · 2 usage · 3 nested · 4 can't run here · 5 conversation busy.
